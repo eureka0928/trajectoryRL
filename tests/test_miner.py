@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import bittensor as bt
 import pytest
 
 from trajectoryrl.base.miner import TrajectoryMiner
@@ -543,3 +544,56 @@ class TestMinerCLI:
 
         result = cli.cmd_validate(args)
         assert result == 1
+
+
+# ===================================================================
+# Tiered Exception Handling
+# ===================================================================
+
+
+class TestSubmitExceptions:
+    """Tests for tiered exception handling in submit_commitment/get_current_commitment."""
+
+    def _make_miner(self):
+        miner = TrajectoryMiner(
+            wallet_name="test", wallet_hotkey="default",
+            netuid=11, network="test",
+        )
+        miner._wallet = MagicMock()
+        miner._subtensor = MagicMock()
+        return miner
+
+    def test_not_registered_error(self):
+        """NotRegisteredError produces actionable btcli guidance."""
+        miner = self._make_miner()
+        miner._subtensor.set_commitment.side_effect = bt.NotRegisteredError()
+
+        with patch("trajectoryrl.base.miner.logger") as mock_logger:
+            result = miner.submit_commitment("a" * 64, "b" * 40, "alice/my-pack")
+            assert result is False
+            log_msg = mock_logger.error.call_args[0][0]
+            assert "not registered" in log_msg.lower()
+            assert "btcli subnet register" in log_msg
+
+    def test_chain_connection_error(self):
+        """ChainConnectionError produces connectivity guidance."""
+        miner = self._make_miner()
+        miner._subtensor.set_commitment.side_effect = bt.ChainConnectionError()
+
+        with patch("trajectoryrl.base.miner.logger") as mock_logger:
+            result = miner.submit_commitment("a" * 64, "b" * 40, "alice/my-pack")
+            assert result is False
+            log_msg = mock_logger.error.call_args[0][0]
+            assert "connect" in log_msg.lower()
+
+    def test_get_commitment_chain_error(self):
+        """get_current_commitment handles ChainConnectionError gracefully."""
+        miner = self._make_miner()
+        miner._wallet.hotkey.ss58_address = "5FakeKey"
+        miner._subtensor.get_all_commitments.side_effect = bt.ChainConnectionError()
+
+        with patch("trajectoryrl.base.miner.logger") as mock_logger:
+            result = miner.get_current_commitment()
+            assert result is None
+            log_msg = mock_logger.error.call_args[0][0]
+            assert "connect" in log_msg.lower()
