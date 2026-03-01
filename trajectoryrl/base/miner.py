@@ -280,8 +280,30 @@ class TrajectoryMiner:
             )
             logger.info("Commitment submitted successfully!")
             return True
+        except bt.NotRegisteredError:
+            logger.error(
+                "Miner hotkey is not registered on subnet %d. "
+                "Run: btcli subnet register --netuid %d --wallet.name %s --wallet.hotkey %s",
+                self.netuid, self.netuid, self.wallet_name, self.wallet_hotkey,
+            )
+            return False
+        except bt.ChainConnectionError as e:
+            logger.error(
+                "Cannot connect to %s network. Check network connectivity "
+                "and that the chain endpoint is reachable: %s", self.network, e,
+            )
+            return False
+        except bt.KeyFileError as e:
+            logger.error(
+                "Wallet key file error: %s. "
+                "Check wallet exists with: btcli wallet list", e,
+            )
+            return False
+        except bt.ChainTransactionError as e:
+            logger.error("Chain transaction failed: %s", e)
+            return False
         except Exception as e:
-            logger.error(f"Failed to submit commitment: {e}")
+            logger.error("Failed to submit commitment (%s): %s", type(e).__name__, e)
             return False
 
     def get_current_commitment(self) -> Optional[str]:
@@ -294,8 +316,20 @@ class TrajectoryMiner:
             hotkey = self.wallet.hotkey.ss58_address
             commitments = self.subtensor.get_all_commitments(netuid=self.netuid)
             return commitments.get(hotkey)
+        except bt.ChainConnectionError as e:
+            logger.error(
+                "Cannot connect to %s network. Check network connectivity "
+                "and that the chain endpoint is reachable: %s", self.network, e,
+            )
+            return None
+        except bt.KeyFileError as e:
+            logger.error(
+                "Wallet key file error: %s. "
+                "Check wallet exists with: btcli wallet list", e,
+            )
+            return None
         except Exception as e:
-            logger.error(f"Failed to read commitment: {e}")
+            logger.error("Failed to read commitment (%s): %s", type(e).__name__, e)
             return None
 
     # ------------------------------------------------------------------
