@@ -288,6 +288,29 @@ class TestCommitmentFormat:
                 repo="alice/my-pack",
             )
 
+    def test_dot_git_slash_stripped(self):
+        """alice/my-pack/.git strips cleanly to alice/my-pack."""
+        c = TrajectoryMiner.format_commitment(
+            pack_hash="a" * 64,
+            git_commit_hash="b" * 40,
+            repo="alice/my-pack/.git",
+        )
+        assert c.endswith("|alice/my-pack")
+
+    def test_dot_git_slash_roundtrip(self):
+        """alice/my-pack/.git passes round-trip through parse_commitment."""
+        from trajectoryrl.utils.commitments import parse_commitment
+
+        c = TrajectoryMiner.format_commitment(
+            pack_hash="a" * 64,
+            git_commit_hash="b" * 40,
+            repo="alice/my-pack/.git",
+        )
+        parsed = parse_commitment(c)
+        assert parsed is not None
+        _, _, repo_url = parsed
+        assert repo_url == "https://github.com/alice/my-pack"
+
 
 # ===================================================================
 # Submit Workflow (mocked Bittensor)

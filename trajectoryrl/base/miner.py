@@ -238,7 +238,7 @@ class TrajectoryMiner:
         # Strip trailing slashes and .git
         repo = repo.rstrip("/")
         if repo.endswith(".git"):
-            repo = repo[:-4]
+            repo = repo[:-4].rstrip("/")
 
         commitment = f"{pack_hash}|{git_commit_hash}|{repo}"
         if len(commitment.encode()) > 128:
