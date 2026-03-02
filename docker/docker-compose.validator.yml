@@ -5,8 +5,8 @@
 # and Watchtower auto-pulls the new image within 5 minutes.
 #
 # Setup:
-#   1. Create .env file (see below)
-#   2. docker compose -f docker/docker-compose.validator.yml up -d
+#   1. Create .env.validator in repo root (see below)
+#   2. docker compose --env-file .env.validator -f docker/docker-compose.validator.yml up -d
 #   3. docker compose -f docker/docker-compose.validator.yml logs -f validator
 #
 # Required .env:
