@@ -1,7 +1,8 @@
-"""Tests for TrajectoryRL miner: pack building, validation, commitment formatting."""
+"""Tests for TrajectoryRL miner: pack building, validation, commitment formatting, daemon."""
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -403,9 +404,16 @@ class TestGitPush:
         pack = TrajectoryMiner.build_pack(agents_md="# Test")
 
         with patch("trajectoryrl.base.miner.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0, stdout="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n",
-            )
+            def side_effect(cmd, *args, **kwargs):
+                # git diff --cached --quiet → returncode=1 means changes staged
+                if cmd == ["git", "diff", "--cached", "--quiet"]:
+                    return MagicMock(returncode=1)
+                return MagicMock(
+                    returncode=0,
+                    stdout="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n",
+                )
+
+            mock_run.side_effect = side_effect
             TrajectoryMiner.git_push_pack(pack, str(tmp_path))
 
             # Find the commit call by looking for "commit" in the command
@@ -620,3 +628,203 @@ class TestSubmitExceptions:
             assert result is None
             log_msg = mock_logger.error.call_args[0][0]
             assert "connect" in log_msg.lower()
+
+
+# ===================================================================
+# Daemon Mode
+# ===================================================================
+
+
+class TestDaemonEntryPoint:
+    """Tests for daemon mode detection in main()."""
+
+    def test_no_subcommand_with_pack_repo_runs_daemon(self):
+        """PACK_REPO set + no subcommand → daemon called."""
+        import sys
+        import neurons.miner as cli
+
+        env = {
+            "PACK_REPO": "alice/my-pack",
+            "REPO_PATH": "/tmp/repo",
+            "PACK_PATH": "/tmp/pack.json",
+        }
+        # Use a regular MagicMock (not AsyncMock) to avoid unawaited coroutine
+        # warnings — asyncio.run is also mocked so no real await happens.
+        mock_daemon = MagicMock(return_value="sentinel")
+        with (
+            patch.object(sys, "argv", ["miner.py"]),
+            patch.dict(os.environ, env, clear=False),
+            patch("neurons.miner._run_daemon", new=mock_daemon),
+            patch("neurons.miner.asyncio.run", return_value=None) as mock_arun,
+        ):
+            cli.main()
+            mock_daemon.assert_called_once()
+            mock_arun.assert_called_once_with("sentinel")
+
+    def test_no_subcommand_without_pack_repo_shows_help(self, capsys):
+        """No PACK_REPO → help text with hint."""
+        import sys
+        import neurons.miner as cli
+
+        with (
+            patch.object(sys, "argv", ["miner.py"]),
+            patch.dict(os.environ, {"PACK_REPO": ""}, clear=False),
+        ):
+            result = cli.main()
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "hint" in captured.out.lower()
+
+
+class TestLoadOrBuildPack:
+    """Tests for _load_or_build_pack helper."""
+
+    def test_load_from_pack_path(self, tmp_path):
+        """Loads pack.json when pack_path is set."""
+        from neurons.miner import _load_or_build_pack
+
+        pack = TrajectoryMiner.build_pack(agents_md="# Policy\nBe safe.")
+        pack_path = str(tmp_path / "pack.json")
+        TrajectoryMiner.save_pack(pack, pack_path)
+
+        config = MagicMock()
+        config.pack_path = pack_path
+        config.agents_md_path = None
+
+        result = _load_or_build_pack(config)
+        assert result is not None
+        assert result["files"]["AGENTS.md"] == "# Policy\nBe safe."
+
+    def test_build_from_agents_md(self, tmp_path):
+        """Builds pack from AGENTS.md when agents_md_path is set."""
+        from neurons.miner import _load_or_build_pack
+
+        agents_file = tmp_path / "AGENTS.md"
+        agents_file.write_text("# File Policy\nDo things.")
+
+        config = MagicMock()
+        config.pack_path = None
+        config.agents_md_path = str(agents_file)
+
+        result = _load_or_build_pack(config)
+        assert result is not None
+        assert "File Policy" in result["files"]["AGENTS.md"]
+
+    def test_missing_file_returns_none(self):
+        """Missing file → None."""
+        from neurons.miner import _load_or_build_pack
+
+        config = MagicMock()
+        config.pack_path = "/tmp/does_not_exist_99999.json"
+        config.agents_md_path = None
+
+        result = _load_or_build_pack(config)
+        assert result is None
+
+
+class TestVerifyOnchain:
+    """Tests for _verify_onchain helper."""
+
+    def test_mismatch_logs_warning(self):
+        """Hash mismatch → returns False."""
+        from neurons.miner import _verify_onchain
+
+        miner = MagicMock()
+        commitment = "a" * 64 + "|" + "b" * 40 + "|alice/my-pack"
+        miner.get_current_commitment.return_value = commitment
+
+        # Expected a different hash
+        result = _verify_onchain(miner, "c" * 64)
+        assert result is False
+
+    def test_match_returns_true(self):
+        """Matching hash → returns True."""
+        from neurons.miner import _verify_onchain
+
+        miner = MagicMock()
+        commitment = "a" * 64 + "|" + "b" * 40 + "|alice/my-pack"
+        miner.get_current_commitment.return_value = commitment
+
+        result = _verify_onchain(miner, "a" * 64)
+        assert result is True
+
+    def test_no_commitment_returns_false(self):
+        """No on-chain commitment → returns False."""
+        from neurons.miner import _verify_onchain
+
+        miner = MagicMock()
+        miner.get_current_commitment.return_value = None
+
+        result = _verify_onchain(miner, "a" * 64)
+        assert result is False
+
+
+class TestGitPushNothingToCommit:
+    """Tests for git_push_pack when pack is unchanged."""
+
+    def test_nothing_to_commit_returns_head(self, tmp_path):
+        """Unchanged pack → returns HEAD hash without commit/push."""
+        # Set up a real git repo with an initial commit
+        subprocess.run(
+            ["git", "init"], cwd=tmp_path, capture_output=True, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+        (tmp_path / "README.md").write_text("init")
+        subprocess.run(
+            ["git", "add", "."], cwd=tmp_path, capture_output=True, check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+
+        pack = TrajectoryMiner.build_pack(agents_md="# Test Policy")
+
+        # First write: write the pack files and commit them directly
+        canonical = json.dumps(pack, sort_keys=True, indent=2)
+        (tmp_path / "pack.json").write_text(canonical)
+        (tmp_path / "AGENTS.md").write_text("# Test Policy")
+        subprocess.run(
+            ["git", "add", "pack.json", "AGENTS.md"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "add pack"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+
+        # Get the HEAD hash
+        head_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_path, capture_output=True, text=True, check=True,
+        )
+        expected_head = head_result.stdout.strip()
+
+        # Capture real subprocess.run before patching
+        real_run = subprocess.run
+
+        # Now git_push_pack with the same pack should detect nothing changed
+        # and return HEAD without attempting commit/push.
+        calls = []
+
+        def tracking_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            if cmd == ["git", "push"]:
+                return MagicMock(returncode=0)
+            return real_run(cmd, *args, **kwargs)
+
+        with patch("trajectoryrl.base.miner.subprocess.run", side_effect=tracking_run):
+            result = TrajectoryMiner.git_push_pack(pack, str(tmp_path))
+
+        assert result == expected_head
+
+        # Verify no commit call was made (only add, diff, rev-parse)
+        commit_calls = [c for c in calls if "commit" in c]
+        assert len(commit_calls) == 0, "Should not have called git commit"
