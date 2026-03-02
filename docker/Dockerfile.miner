@@ -37,6 +37,9 @@ ENV LOG_LEVEL=INFO
 ENV PACK_PATH=/app/packs/pack.json
 ENV PACK_REPO=""
 ENV PACK_COMMIT=""
+ENV AGENTS_MD_PATH=""
+ENV REPO_PATH=/app/packs
+ENV CHECK_INTERVAL=3600
 
 # Run miner
 CMD ["python", "-u", "neurons/miner.py"]

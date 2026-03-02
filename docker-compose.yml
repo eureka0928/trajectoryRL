@@ -200,11 +200,14 @@ services:
       - PACK_PATH=${PACK_PATH:-/app/packs/pack.json}
       - PACK_REPO=${PACK_REPO:-}
       - PACK_COMMIT=${PACK_COMMIT:-}
+      - AGENTS_MD_PATH=${AGENTS_MD_PATH:-}
+      - REPO_PATH=${REPO_PATH:-/app/packs}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-3600}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
-      - ./packs:/app/packs:ro
+      - ./packs:/app/packs
       - ./logs:/app/logs
     networks:
       - trajectoryrl

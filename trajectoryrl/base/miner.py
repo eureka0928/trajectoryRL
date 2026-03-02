@@ -368,11 +368,30 @@ class TrajectoryMiner:
             (repo / "AGENTS.md").write_text(agents_md)
 
         try:
-            # Stage, commit, push
+            # Stage files
             subprocess.run(
                 ["git", "add", "pack.json", "AGENTS.md"],
                 cwd=repo_path, check=True, capture_output=True,
             )
+
+            # Check if anything actually changed in the index
+            diff_result = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
+                cwd=repo_path, capture_output=True,
+            )
+            if diff_result.returncode == 0:
+                # Nothing changed — return current HEAD hash
+                result = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo_path, check=True, capture_output=True, text=True,
+                )
+                commit_hash = result.stdout.strip()
+                logger.info(
+                    "Pack unchanged, skipping commit (HEAD: %s...)", commit_hash[:12]
+                )
+                return commit_hash
+
+            # Commit and push
             subprocess.run(
                 [
                     "git",
