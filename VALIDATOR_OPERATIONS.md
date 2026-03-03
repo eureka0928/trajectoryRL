@@ -15,15 +15,15 @@ This is by design: miners compete on *intelligence* (better prompts/policies), n
 
 ## Validator Cost Model
 
-Each epoch, a validator evaluates every active miner whose pack has changed since last evaluation:
+Each eval_interval (4h), a validator evaluates active miners marked for re-evaluation — either their `pack_hash` changed or `eval_interval` has elapsed since last eval:
 
 ```
-episodes_per_new_miner = scenarios(5) × 1 run each = 5 per miner
-epochs_per_day         = 24h / epoch_interval(24h) = 1
-episodes_per_day       = new_or_changed_miners × 5
+episodes_per_eval      = scenarios(5) × 1 run each = 5 per miner
+max_evals_per_day      = 24h / eval_interval(4h) = 6
+episodes_per_day       = marked_miners × 5 × evals_triggered
 ```
 
-> **Score persistence**: Validators only re-evaluate a miner when their `pack_hash` changes. Unchanged packs carry forward their cached score at zero cost. In steady state, most epochs evaluate only 0-2 new submissions.
+> **EMA accumulation**: Validators re-evaluate packs periodically (even if unchanged) to accumulate per-scenario EMA samples and smooth out LLM non-determinism. Rate-limited to at most 1 eval per miner per eval_interval.
 
 **Per-episode token estimate** (averaged across 5 scenarios):
 
@@ -42,20 +42,20 @@ Designated model: `anthropic/claude-sonnet-4-5-20250929` ($3/M input, $15/M outp
 
 **All validators must use the designated model.** This is a consensus requirement: if validators use different models, agents produce different tool-call sequences, leading to different rubric outcomes and validator disagreement on scores. Using the wrong model puts your validator out of consensus and risks down-weighting by Yuma.
 
-### Worst-case: all miners submit new packs every epoch
+### Worst-case: all miners re-evaluated every eval_interval
 
 | Active Miners | Episodes/day | Daily Cost | Monthly Cost |
 |:-------------:|:------------:|:----------:|:------------:|
-| 5 | 25 | **$0.50** | **$15** |
-| 14 | 70 | **$1.40** | **$42** |
-| 30 | 150 | **$3.00** | **$90** |
-| 64 | 320 | **$6.40** | **$192** |
-| 128 | 640 | **$12.80** | **$384** |
-| 256 | 1,280 | **$25.60** | **$768** |
+| 5 | 150 | **$3.00** | **$90** |
+| 14 | 420 | **$8.40** | **$252** |
+| 30 | 900 | **$18.00** | **$540** |
+| 64 | 1,920 | **$38.40** | **$1,152** |
+| 128 | 3,840 | **$76.80** | **$2,304** |
+| 256 | 7,680 | **$153.60** | **$4,608** |
 
-**Worst-case formula**: `daily_cost ≈ miners × $0.10/day` (5 scenarios × $0.02/episode).
+**Worst-case formula**: `daily_cost ≈ miners × 6 evals × 5 episodes × $0.02 = miners × $0.60/day`.
 
-In practice, most epochs only re-evaluate a handful of new/changed packs. A typical day with 30 miners and 2 new submissions costs ~$0.20, not $3.00.
+In practice, miners in steady state rarely change packs more than once per day. A typical day with 30 miners and 2 changed packs evaluates ~10 episodes for new packs plus periodic re-evals of stable packs for EMA accumulation.
 
 ## Miner Cost Model
 
@@ -69,8 +69,8 @@ In practice, most epochs only re-evaluate a handful of new/changed packs. A typi
 
 ## Cost Reduction Levers
 
-1. **Score persistence** (built-in): Validators only re-evaluate when `pack_hash` changes — unchanged packs cost zero. This is the primary cost control mechanism
-2. **24h epoch interval** (built-in): Caps evaluation to once per miner per day, even if a miner submits multiple times
+1. **Rate limiting** (built-in): At most 1 eval per miner per eval_interval (4h), regardless of how often the miner updates their commitment. Prevents API budget drain from rapid submissions
+2. **EMA convergence**: Once a pack's EMA scores stabilize, re-evaluation adds diminishing value. Future optimization: skip re-eval when EMA variance is below threshold
 3. **Prompt caching**: Anthropic prompt caching saves ~80% on input tokens (fixture data is identical across runs for the same scenario)
 
 ## Sustainability
@@ -83,47 +83,43 @@ Validators earn **subnet alpha**, not TAO directly. Alpha can be swapped for TAO
 Estimated alpha earnings (medium stake ~5k TAO, ~10% validator weight):
   ~295 alpha/day ≈ 4 TAO-equivalent at current pool rate ≈ $720/day
 
-Example (30 miners, worst-case all submit new packs):
-  Daily costs:   30 × $0.10 = $3.00/day
+Example (30 miners, worst-case all re-evaluated every interval):
+  Daily costs:   30 × $0.60 = $18.00/day
   Daily revenue: ~$720/day (alpha, at current pool rate)
-  Net profit:    ~$717/day (~99% margin)
+  Net profit:    ~$702/day (~98% margin)
 
-Example (30 miners, typical day with 2 new submissions):
-  Daily costs:   2 × $0.10 = $0.20/day
+Example (30 miners, typical day):
+  Daily costs:   ~$5-10/day (mix of re-evals and stable packs)
   Daily revenue: ~$720/day
-  Net profit:    ~$720/day
+  Net profit:    ~$710/day
 ```
 
 **At current rates**, TrajectoryRL validators are highly profitable:
 
 | Scenario | Daily Cost (worst-case) | Daily Revenue (~$720 alpha) | Monthly Profit |
 |----------|:----------:|:---------------------------:|:--------------:|
-| 30 miners | $3.00 | $720 | **$21,510** |
-| 64 miners | $6.40 | $720 | **$21,408** |
-| 128 miners | $12.80 | $720 | **$21,216** |
-| 256 miners | $25.60 | $720 | **$20,832** |
+| 30 miners | $18.00 | $720 | **$21,060** |
+| 64 miners | $38.40 | $720 | **$20,448** |
+| 128 miners | $76.80 | $720 | **$19,296** |
+| 256 miners | $153.60 | $720 | **$16,992** |
 
-Even at 256 miners (worst case, all submitting new packs every day), LLM costs are only **~4%** of validator alpha revenue. In practice, costs are far lower due to score persistence.
+Even at 256 miners (worst case, all re-evaluated every eval_interval), LLM costs are only **~21%** of validator alpha revenue.
 
-**Break-even analysis**: At 256 miners ($25.60/day worst-case cost), the alpha-TAO pool rate would need to drop ~28x from current levels before validators become unprofitable. Note: these figures fluctuate with pool exchange rates and subnet demand.
+**Break-even analysis**: At 256 miners ($153.60/day worst-case cost), the alpha-TAO pool rate would need to drop ~5x from current levels before validators become unprofitable. Note: these figures fluctuate with pool exchange rates and subnet demand.
 
-## Score Publishing
+## Weight Setting
 
-Validators publish per-UID scores to the shared `trajectoryRL/validator-scores` GitHub repo after each evaluation. This is required for stake-weighted consensus: validators that don't publish are excluded from the aggregation.
+Each validator sets weights independently based on its own evaluation data. There is no shared score repo or off-chain consensus mechanism.
 
-Validators do not have direct write access to the repo. Scores are submitted via PRs that a CI pipeline auto-merges after verifying the sr25519 payload signature inside the JSON.
+Every tempo (~72 min), the validator:
+1. Computes `final_score` for each miner from its per-scenario EMA state
+2. Selects the winner (highest `final_score`, subject to first-mover delta threshold)
+3. Maps miner hotkeys to UIDs via the current metagraph
+4. Sets weights on-chain via commit-reveal
 
-Each epoch, the validator:
-1. Evaluates new/changed packs via ClawBench
-2. Creates a score file with an sr25519 signature over the payload
-3. Commits to its fork of `validator-scores`, opens a PR with the score file at `epoch-{N}/{hotkey}.json`
-4. CI verifies the payload signature, hotkey registration, stake, and JSON schema, then auto-merges
-5. Pulls all merged scores, computes stake-weighted mean
-6. Sets on-chain weights based on the consensus winner
+Cross-validator consensus is handled entirely on-chain by **YC3 (Yuma Consensus 3)** with **Liquid Alpha**, which dynamically adjusts per-bond learning rates based on how well validators agree.
 
-Every tempo (~72 min), the validator re-pulls scores, re-computes consensus, and re-submits weights. This allows consensus to converge as more validators publish their results.
-
-For full details on the shared score bucket, signed score files, and stake-weighted aggregation, see [INCENTIVE_MECHANISM.md — Validator Consensus](INCENTIVE_MECHANISM.md#validator-consensus).
+For full details on EMA scoring, winner selection, and YC3 configuration, see [INCENTIVE_MECHANISM.md — Validator Consensus](INCENTIVE_MECHANISM.md#validator-consensus).
 
 ---
 
