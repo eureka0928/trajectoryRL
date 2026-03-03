@@ -344,9 +344,16 @@ class ClawBenchHarness:
         """
         # Wipe workspace so stale files from a previous miner's pack
         # (e.g. SOUL.md, skills/) don't leak into the next evaluation.
+        # Clear contents instead of rmtree to avoid EBUSY on Docker
+        # named-volume mount points.
         if workspace.exists():
-            shutil.rmtree(workspace)
-        workspace.mkdir(parents=True, exist_ok=True)
+            for child in workspace.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        else:
+            workspace.mkdir(parents=True, exist_ok=True)
         workspace_abs = workspace.resolve()
 
         # Write files from pack.
