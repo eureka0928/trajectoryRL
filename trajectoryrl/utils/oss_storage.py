@@ -66,7 +66,10 @@ class OSSStorage:
 
     @staticmethod
     def _pack_key() -> str:
-        return f"{uuid.uuid4().hex}.json"
+        # Short key (8 hex chars) to keep the public URL under the
+        # 128-byte bittensor commitment limit.  64 (hash) + 1 (|) = 65
+        # leaves 63 bytes for the URL.
+        return f"{uuid.uuid4().hex[:8]}.json"
 
     def upload_pack(self, pack: dict) -> str:
         """Upload a pack dict and return its public URL.
