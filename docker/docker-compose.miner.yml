@@ -1,43 +1,55 @@
-# TrajectoryRL Miner — Local Development
+# TrajectoryRL Miner — Production Compose
 #
-# Daemon mode:
-#   docker compose -f docker/docker-compose.miner-dev.yml up              # default mode
-#   MODE=demo docker compose -f docker/docker-compose.miner-dev.yml up    # demo mode
+# Setup:
+#   1. cp .env.miner.example .env.miner   # fill in credentials
+#   2. docker compose -f docker/docker-compose.miner.yml up -d
+#   3. docker compose -f docker/docker-compose.miner.yml logs -f miner
 #
-# CLI mode (one-shot):
-#   docker compose -f docker/docker-compose.miner-dev.yml run --rm miner \
-#       submit https://example.com/pack.json
+# Demo mode (no API key / S3 needed):
+#   MODE=demo docker compose -f docker/docker-compose.miner.yml up -d
 #
-#   docker compose -f docker/docker-compose.miner-dev.yml run --rm miner status
-#
-#   docker compose -f docker/docker-compose.miner-dev.yml run --rm miner \
-#       build --agents-md /app/packs/AGENTS.md -o /app/packs/pack.json
-#
-#   docker compose -f docker/docker-compose.miner-dev.yml run --rm miner \
-#       validate /app/packs/pack.json
+# See MINER_OPERATIONS.md for full CLI reference.
 
 services:
+  # --------------------------------------------------------------------------
+  # Miner: LLM generate → build pack → upload → submit on-chain (loop)
+  # --------------------------------------------------------------------------
   miner:
     build:
       context: ..
       dockerfile: docker/Dockerfile.miner
-    container_name: trajectoryrl_miner_dev
+    container_name: trajectoryrl_miner
     restart: unless-stopped
     command: ["python", "-u", "neurons/miner.py", "run", "--mode", "${MODE:-default}"]
+    env_file: ../.env.miner
     environment:
+      # --- Bittensor ---
       - WALLET_NAME=${WALLET_NAME:-miner}
       - WALLET_HOTKEY=${WALLET_HOTKEY:-default}
       - NETUID=${NETUID:-11}
       - NETWORK=${NETWORK:-finney}
+      # --- LLM generation (default mode) ---
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GENERATOR_MODEL=${GENERATOR_MODEL:-claude-sonnet-4-5-20250929}
+      # --- S3-compatible upload (default mode) ---
+      - S3_BUCKET=${S3_BUCKET:-}
+      - S3_REGION=${S3_REGION:-us-east-1}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      # --- Pre-set pack URL (skips S3 upload) ---
+      - PACK_URL=${PACK_URL:-}
+      # --- Daemon ---
       - CHECK_INTERVAL=${CHECK_INTERVAL:-3600}
-      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
-      - ../neurons:/app/neurons
-      - ../trajectoryrl:/app/trajectoryrl
-      - ../packs:/app/packs
+      - miner-packs:/app/packs
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  miner-packs:
