@@ -1,7 +1,7 @@
 # Miner Operations Guide
 
 **Subnet**: SN11 (TrajectoryRL)
-**Date**: 2026-02-23
+**Date**: 2026-03-04
 
 > For mechanism design and scoring rules, see [INCENTIVE_MECHANISM.md](INCENTIVE_MECHANISM.md).
 
@@ -22,8 +22,8 @@ The best pack wins 100% of miner emissions each epoch (or top-3 split 70/20/10 i
 | **Bittensor wallet** | `btcli wallet create --wallet.name miner --wallet.hotkey default` |
 | **Registration** | `btcli subnet register --netuid 11 --wallet.name miner` (dynamic cost, check CLI before registering) |
 | **Python** | 3.10+ |
-| **HTTP hosting** | Any public HTTP(S) endpoint for pack hosting |
-| **LLM API key** | For local ClawBench testing (Anthropic, OpenAI, or local model) |
+| **HTTP hosting** | Any public HTTP(S) endpoint for pack hosting (or S3-compatible bucket for `--mode default`) |
+| **LLM API key** | Anthropic API key required for `--mode default`; any LLM for manual local testing |
 
 ---
 
@@ -54,61 +54,158 @@ Constraints: `AGENTS.md` required, total JSON ≤ 32KB, valid semver, content-ad
 
 ---
 
-## Reference Miner Implementation (WIP)
+## Quick Start
 
-The reference miner uses **Claude Opus 4.6** to autonomously generate, test, and iterate policy packs. It will be included in this repo at `neurons/miner.py`.
+### Docker (recommended)
 
-### How It Works
+```bash
+git clone https://github.com/trajectoryRL/trajectoryRL.git
+cd trajectoryRL
+cp .env.miner.example .env.miner
+# Edit .env.miner — set ANTHROPIC_API_KEY, S3_BUCKET, AWS credentials
+
+docker compose -f docker/docker-compose.miner.yml up -d
+docker compose -f docker/docker-compose.miner.yml logs -f miner
+```
+
+### Bare metal
+
+```bash
+git clone https://github.com/trajectoryRL/trajectoryRL.git
+cd trajectoryRL
+pip install -e .
+cp .env.miner.example .env.miner
+# Edit .env.miner — set ANTHROPIC_API_KEY, S3_BUCKET, AWS credentials
+
+python neurons/miner.py run --mode default
+```
+
+---
+
+## Run Modes
+
+### Default Mode (Recommended)
+
+Fully automated: an LLM generates AGENTS.md, builds a pack, uploads to S3-compatible storage, and submits on-chain. Each cycle improves the policy by feeding the previous AGENTS.md back to the LLM.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Reference Miner Loop                                   │
+│  Default Mode Loop                                      │
 │                                                         │
-│  1. Read scenario YAMLs + rubric checks as context      │
-│  2. Generate candidate AGENTS.md via Opus 4.6           │
-│  3. Run ClawBench locally, collect per-check results    │
-│  4. Feed failed checks back to Opus 4.6 for iteration   │
-│  5. Repeat until score stabilizes or budget exhausted   │
-│  6. Upload winning pack to public HTTP endpoint          │
-│  7. Submit on-chain commitment (pack_hash + pack_url)   │
+│  1. Generate (or improve) AGENTS.md via Anthropic API   │
+│  2. Build OPP v1 pack                                   │
+│  3. Validate locally (schema + size)                    │
+│  4. Skip if pack hash matches on-chain (no-op)          │
+│  5. Upload to S3-compatible storage (GCS, AWS, R2, …)   │
+│  6. Submit on-chain commitment (hash|url ≤ 128 bytes)   │
+│  7. Sleep interval, then repeat with improved policy    │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### What Opus 4.6 Sees
+```bash
+python neurons/miner.py run --mode default
+python neurons/miner.py run --mode default --interval 1800  # every 30 min
+```
 
-The LLM receives:
-- All scenario YAML definitions (check types, point values, categories)
-- Available tool surface (exec, slack, memory_search, memory_get, read)
-- Failed check IDs and their point values from the previous iteration
-- The scoring formula (weighted mean - variance penalty)
+**Requirements**: `ANTHROPIC_API_KEY` + either `S3_BUCKET` (auto-upload) or `PACK_URL` (you upload manually).
 
-From this context, Opus 4.6 generates an AGENTS.md that targets the highest-value failed checks first (safety > correctness > efficiency > structure).
+The generator prompt includes all 5 ClawBench scenario descriptions, available tool surface, rubric check categories, scoring formula (`weighted_mean - 0.1 * variance`), and policy constraints (<28K chars, no hardcoded names/dates). If a previous AGENTS.md exists from the last cycle, it's fed back with an improvement instruction.
 
-### Why This Approach
+### Demo Mode
 
-Policy optimization is fundamentally a language task — understanding what rubric checks test, then writing instructions that cause an agent to pass them. An LLM that can read the scoring rubric and iterate on failures is a natural fit. The reference miner demonstrates this loop end-to-end.
+Fetches and submits a sample pack from `trajrl.com`. Useful for verifying wallet setup and on-chain submission without needing an LLM API key or S3 bucket.
 
-Miners are free to use any approach: manual prompt engineering, different LLMs, evolutionary search, or hybrid strategies. The reference miner is a starting point, not a ceiling.
+```bash
+python neurons/miner.py run --mode demo
+```
 
-**Status**: WIP — will be implemented and included in this repo.
+Policy optimization is fundamentally a language task — understanding what rubric checks test, then writing instructions that cause an agent to pass them. Miners are free to use any approach: manual prompt engineering, different LLMs, evolutionary search, or hybrid strategies. The default mode is a starting point, not a ceiling.
+
+---
+
+## Configuration (`.env.miner`)
+
+```bash
+cp .env.miner.example .env.miner
+```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `WALLET_NAME` | yes | `miner` | Bittensor wallet name |
+| `WALLET_HOTKEY` | yes | `default` | Bittensor hotkey |
+| `NETUID` | yes | `11` | Subnet ID |
+| `NETWORK` | yes | `finney` | Bittensor network |
+| `ANTHROPIC_API_KEY` | default mode | — | Anthropic API key for LLM generation |
+| `GENERATOR_MODEL` | no | `claude-sonnet-4-5-20250929` | Model for AGENTS.md generation |
+| `S3_BUCKET` | default mode* | — | S3-compatible bucket name |
+| `S3_ENDPOINT_URL` | no | — | Custom endpoint for GCS/R2/MinIO |
+| `S3_REGION` | no | `us-east-1` | Bucket region |
+| `AWS_ACCESS_KEY_ID` | default mode* | — | S3/GCS HMAC access key |
+| `AWS_SECRET_ACCESS_KEY` | default mode* | — | S3/GCS HMAC secret key |
+| `PACK_URL` | no | — | Skip S3 upload; use this fixed URL instead |
+| `CHECK_INTERVAL` | no | `3600` | Seconds between cycles |
+| `LOG_LEVEL` | no | `INFO` | Logging level |
+
+\* Required unless `PACK_URL` is set (in which case you upload the pack yourself).
+
+### S3-Compatible Storage
+
+Default mode uploads packs via presigned URLs. Works with any S3-compatible service:
+
+| Service | `S3_ENDPOINT_URL` | Credentials |
+|---------|-------------------|-------------|
+| **AWS S3** | _(leave empty)_ | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` |
+| **Google Cloud Storage** | `https://storage.googleapis.com` | GCS HMAC keys |
+| **Cloudflare R2** | `https://<account>.r2.cloudflarestorage.com` | R2 API tokens |
+| **MinIO** | `https://your-minio-host:9000` | MinIO access/secret keys |
+
+---
+
+## CLI Reference
+
+```bash
+# Daemon modes
+python neurons/miner.py run --mode default    # LLM generate → upload → submit (loop)
+python neurons/miner.py run --mode demo       # submit sample pack (loop)
+
+# One-shot commands
+python neurons/miner.py build --agents-md ./AGENTS.md -o pack.json
+python neurons/miner.py validate pack.json
+python neurons/miner.py submit https://example.com/pack.json
+python neurons/miner.py status
+```
+
+### Docker equivalents
+
+```bash
+# Shorthand
+alias miner="docker compose -f docker/docker-compose.miner.yml"
+
+# Daemon
+miner up -d                                                      # default mode
+MODE=demo miner up -d                                            # demo mode
+miner logs -f miner                                              # follow logs
+miner down                                                       # stop
+
+# One-shot
+miner run --rm miner status
+miner run --rm miner build --agents-md /app/packs/AGENTS.md -o /app/packs/pack.json
+miner run --rm miner validate /app/packs/pack.json
+miner run --rm miner submit https://example.com/pack.json
+```
 
 ---
 
 ## Local Testing
 
-### Setup
-
 ```bash
-git clone https://github.com/trajectoryRL/trajectoryRL.git
-cd trajectoryRL/clawbench
+cd clawbench
 pip install -e .
 cp .env.example .env
 # Edit .env — set CLAWBENCH_MODEL (e.g., anthropic/claude-sonnet-4-5-20250929)
 ```
 
 Validators use `claude-sonnet-4-5-20250929`. Miners can use any model for local testing since scoring is regex-based. Use a cheaper model for rapid iteration, validate final results with Sonnet 4.5.
-
-### Running Scenarios
 
 ```bash
 # Single scenario
@@ -117,13 +214,7 @@ python scripts/run_episode.py --scenario inbox_triage --variant optimized --json
 # All scenarios
 python scripts/run_batch.py
 
-# List available scenarios
-python scripts/run_episode.py --list
-```
-
-### Testing Your Own Pack
-
-```bash
+# Test your own pack
 cp /path/to/your/AGENTS.md clawbench/fixtures/inbox_triage/AGENTS.md.optimized
 python scripts/run_episode.py --scenario inbox_triage --variant optimized --json
 ```
@@ -132,29 +223,26 @@ The `--json` output shows per-check pass/fail results. Focus on failed checks wi
 
 ---
 
-## Submission Workflow
+## Manual Submission Workflow
 
-### 1. Upload Pack to Public HTTP Endpoint
-
-Upload your `pack.json` to any publicly accessible HTTP(S) URL. The only requirement is that `GET <url>` returns the pack JSON with HTTP 200.
-
-### 2. Submit On-Chain Commitment
-
-After uploading, submit your pack metadata on-chain:
+If you prefer writing your own AGENTS.md instead of using `--mode default`:
 
 ```bash
-python neurons/miner.py submit pack.json \
-  --pack-url https://trajrl.com/samples/pack.json \
-  --wallet.name miner --wallet.hotkey default
+# 1. Build pack
+python neurons/miner.py build --agents-md ./AGENTS.md -o pack.json
+
+# 2. Upload pack.json to any public HTTP(S) URL, then submit
+python neurons/miner.py submit https://your-server.com/pack.json
+
+# 3. Verify
+python neurons/miner.py status
 ```
 
-This calls `subtensor.set_commitment(netuid=11, data=commitment_string)` with your `pack_hash` and `pack_url`. The **on-chain commitment block number** establishes first-mover precedence (unforgeable, deterministic).
+The commitment format is `{pack_hash}|{pack_url}` (≤128 bytes). The **on-chain block number** establishes first-mover precedence.
 
 > **Rate limit**: One commitment per ~100 blocks (~20 min) per hotkey — sufficient for daily epochs.
 
-### 3. Iterate
-
-Epochs run every 24 hours. Upload improved packs (keeping the same URL or using a new one) and submit a new on-chain commitment — the next epoch picks up your latest submission. Validators only re-evaluate when your `pack_hash` changes, so resubmitting the same pack is a no-op.
+Epochs run every 24 hours. Upload improved packs and submit a new commitment — validators only re-evaluate when your `pack_hash` changes.
 
 ---
 
