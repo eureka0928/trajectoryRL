@@ -29,6 +29,7 @@ class EvaluationResult:
         error: Error message if evaluation failed
         cost_usd: Total episode cost in USD (None if unavailable)
         token_usage: Token breakdown {input, output, cache_read, cache_write}
+        model_usage: Per-model cost breakdown for multi-model routing (None if single model)
     """
     scenario_name: str
     score: float
@@ -39,6 +40,7 @@ class EvaluationResult:
     error: Optional[str] = None
     cost_usd: Optional[float] = None
     token_usage: Optional[Dict[str, int]] = None
+    model_usage: Optional[List[Dict[str, Any]]] = None
 
 
 class ClawBenchHarness:
@@ -241,6 +243,9 @@ class ClawBenchHarness:
         # Use response from the run closest to voted score
         closest = min(valid_runs, key=lambda r: abs(r.score - voted_score))
 
+        # Per-model breakdown from the median-cost run (structural, not aggregatable)
+        median_model_usage = closest.model_usage
+
         cost_str = f", cost=${median_cost:.4f}" if median_cost is not None else ""
         logger.info(
             f"Consensus result: {scenario_name} → score={voted_score:.3f}{cost_str} "
@@ -256,6 +261,7 @@ class ClawBenchHarness:
             rubric=voted_rubric,
             cost_usd=median_cost,
             token_usage=median_tokens,
+            model_usage=median_model_usage,
         )
 
     @staticmethod
@@ -479,6 +485,7 @@ class ClawBenchHarness:
             # Extract cost data (optional field from run_episode.py)
             cost_usd = None
             token_usage = None
+            model_usage = None
             cost_data = result_data.get("cost")
             if cost_data and isinstance(cost_data, dict):
                 cost_usd = cost_data.get("total_usd")
@@ -488,6 +495,10 @@ class ClawBenchHarness:
                     "cache_read_tokens": cost_data.get("cache_read_tokens", 0),
                     "cache_write_tokens": cost_data.get("cache_write_tokens", 0),
                 }
+                # Per-model breakdown for multi-model routing telemetry
+                models = cost_data.get("models")
+                if models and isinstance(models, list):
+                    model_usage = models
 
             return EvaluationResult(
                 scenario_name=scenario_name,
@@ -498,6 +509,7 @@ class ClawBenchHarness:
                 rubric=rubric,
                 cost_usd=cost_usd,
                 token_usage=token_usage,
+                model_usage=model_usage,
             )
 
         except asyncio.TimeoutError:
