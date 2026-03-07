@@ -286,7 +286,7 @@ Validators **always call `set_weights` every tempo**, never skip. Validators tha
 
 **Bootstrap at zero**: The **first miner to submit any valid pack that passes the qualification gate immediately wins all the weight**. This gets beaten quickly as other miners optimize costs. There is no minimum cost threshold. Any qualified pack is eligible to win.
 
-If no miner has a valid on-chain commitment, the validator sets **uniform weights across all registered UIDs**. This is a degenerate case (dead subnet) that resolves itself as soon as any miner submits.
+If no miner has a valid on-chain commitment (or no miner has cost data), the validator sets **all weight to the subnet owner UID**. This ensures the validator always calls `set_weights` (avoiding deregistration). Note: **miner incentive directed to the owner hotkey is burned** by the chain (not paid to the owner), so this fallback effectively burns miner emissions until a qualifying miner submits. This is a degenerate case that resolves itself as soon as any miner submits a qualifying pack.
 
 ### Miner Inactivity
 

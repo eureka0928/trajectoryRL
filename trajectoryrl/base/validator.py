@@ -989,26 +989,23 @@ class TrajectoryValidator:
 
         num_active = len(scores)
 
-        # Use cost-based winner selection if cost data available
-        if costs:
-            weights_dict = self.scorer.select_winner_by_cost(
-                costs=costs,
-                qualified=qualified,
-                first_mover_data=self.first_mover_data,
-                cost_delta=self.config.cost_delta,
-                num_active_miners=num_active,
-                uid_to_hotkey=uid_to_hotkey,
-            )
-        else:
-            # Fallback to score-based selection (transition period)
-            logger.info("No cost data available, using score-based selection")
-            weights_dict = self.scorer.select_winner(
-                scores=scores,
-                first_mover_data=self.first_mover_data,
-                delta=self.config.delta_threshold,
-                num_active_miners=num_active,
-                uid_to_hotkey=uid_to_hotkey,
-            )
+        # Cost data is required for winner selection. If no cost data
+        # is available (should not happen in normal operation), fall back
+        # to owner-UID weights rather than using score-based selection.
+        if not costs:
+            logger.warning("No cost data available, setting fallback weights")
+            self._build_report_metadata(active, scores, costs, qualified)
+            await self._set_fallback_weights()
+            return
+
+        weights_dict = self.scorer.select_winner_by_cost(
+            costs=costs,
+            qualified=qualified,
+            first_mover_data=self.first_mover_data,
+            cost_delta=self.config.cost_delta,
+            num_active_miners=num_active,
+            uid_to_hotkey=uid_to_hotkey,
+        )
 
         # Log results
         logger.info("=" * 60)
@@ -1055,9 +1052,10 @@ class TrajectoryValidator:
     async def _set_fallback_weights(self, reason: str = "No eligible miners"):
         """Set weights to subnet owner UID when no miners qualify.
 
-        Directs all emission to the subnet owner so it is not wasted on
-        inactive or unregistered UIDs.  The validator must always call
-        set_weights every tempo to avoid being deregistered by the chain.
+        Miner incentive directed to the owner hotkey is burned by the
+        chain (not paid to the owner), so this effectively burns miner
+        emissions until a qualifying miner submits.  The validator must
+        always call set_weights every tempo to avoid deregistration.
         """
         try:
             # Verify wallet is accessible before attempting on-chain call
