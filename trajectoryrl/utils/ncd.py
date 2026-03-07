@@ -144,9 +144,11 @@ def deduplicate_packs(
             cab = len(zlib.compress(text_i + text_j, 9))
             max_c = max(ci, cj)
             if max_c == 0:
-                continue
-            ncd = (cab - min(ci, cj)) / max_c
-            similarity = 1.0 - ncd
+                # Both texts compress to zero → both empty → identical
+                similarity = 1.0
+            else:
+                ncd = (cab - min(ci, cj)) / max_c
+                similarity = 1.0 - ncd
 
             if similarity >= threshold:
                 copier_hotkey = unique_reps[hash_j][0]
@@ -157,8 +159,11 @@ def deduplicate_packs(
                     f"(similarity={similarity:.3f} with "
                     f"{original_hotkey[:8]})"
                 )
-                for member_hk, _, _ in hash_groups[hash_j]:
-                    if member_hk not in excluded:
-                        excluded[member_hk] = original_hotkey
+                # Re-attribute Layer 1 members of hash_j: they were
+                # mapped to copier_hotkey (their group's first mover),
+                # but that rep is now itself excluded. Update them to
+                # point to the true original from hash_i's group.
+                for member_hk, _, _ in hash_groups[hash_j][1:]:
+                    excluded[member_hk] = original_hotkey
 
     return excluded

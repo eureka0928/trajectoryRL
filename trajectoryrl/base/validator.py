@@ -527,18 +527,23 @@ class TrajectoryValidator:
             f"context=[{epoch_ctx.user_name}, {epoch_ctx.user_role}]"
         )
 
-        # 1. Sync metagraph
+        # 1. Clear per-cycle pack caches to prevent stale entries from
+        # deregistered miners affecting NCD comparisons in the weight phase.
+        self._hotkey_packs.clear()
+        self._pack_by_hash.clear()
+
+        # 2. Sync metagraph
         logger.info("Syncing metagraph...")
         self.metagraph.sync(subtensor=self.subtensor)
 
-        # 2. Read on-chain commitments
+        # 3. Read on-chain commitments
         logger.info("Reading on-chain commitments...")
         commitments = fetch_all_commitments(
             self.subtensor, self.config.netuid, self.metagraph
         )
         logger.info(f"Found {len(commitments)} valid commitments")
 
-        # 3. Filter to non-validator miners
+        # 4. Filter to non-validator miners
         active_commitments = self._filter_active_commitments(commitments)
         logger.info(f"Active miners: {len(active_commitments)}")
 
@@ -547,9 +552,12 @@ class TrajectoryValidator:
             await self._set_fallback_weights()
             return
 
-        # 4. Pack-hash pre-dedup: for miners with identical pack_hash,
+        # 5. Pack-hash pre-dedup: for miners with identical pack_hash,
         # only evaluate the first mover (lowest block_number).
         # Saves LLM API calls. Full NCD dedup happens in weight phase.
+        # Skipped miners will have no entries in scores/costs/qualified
+        # and receive weight 0 — this is intentional since their pack is
+        # identical to the evaluated first mover.
         hash_earliest: Dict[str, Tuple[int, int]] = {}
         for uid, commitment in active_commitments.items():
             ph = commitment.pack_hash
@@ -566,7 +574,7 @@ class TrajectoryValidator:
                     f"(duplicate pack_hash={commitment.pack_hash[:12]})"
                 )
 
-        # 5. Evaluate miners
+        # 6. Evaluate miners
         eval_scenarios = sorted(self.scenarios.keys())
         evaluated_count = 0
         attempted_count = 0
