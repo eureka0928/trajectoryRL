@@ -873,6 +873,12 @@ class TrajectoryValidator:
         if weights_dict is None:
             weights_dict = {}
 
+        # Get scenario weights for per-scenario metadata
+        scenario_weights = {
+            name: cfg.get("weight", 1.0)
+            for name, cfg in self.scenarios.items()
+        }
+
         miner_scores: Dict[str, Dict[str, Any]] = {}
         for uid, commitment in active.items():
             hk = commitment.hotkey
@@ -890,6 +896,25 @@ class TrajectoryValidator:
                     cost = cost_from_ema
             if cost is not None:
                 entry["cost"] = round(cost, 4)
+
+            # Build scenario_scores from EMA state
+            scenario_scores: Dict[str, Dict[str, Any]] = {}
+            ema_scores = self.ema_scores.get(hk, {})
+            ema_costs = self.ema_costs.get(hk, {})
+            qualified_scenarios = self.scenario_qualified.get(hk, {})
+
+            for scenario_name in self.scenarios.keys():
+                scenario_entry: Dict[str, Any] = {
+                    "score": round(ema_scores.get(scenario_name, 0.0), 4),
+                    "weight": round(scenario_weights.get(scenario_name, 1.0), 4),
+                    "qualified": qualified_scenarios.get(scenario_name, False),
+                }
+                scenario_cost = ema_costs.get(scenario_name)
+                if scenario_cost is not None:
+                    scenario_entry["cost"] = round(scenario_cost, 4)
+                scenario_scores[scenario_name] = scenario_entry
+
+            entry["scenario_scores"] = scenario_scores
             miner_scores[hk] = entry
 
         self._report_metadata["miner_scores"] = miner_scores
@@ -929,7 +954,11 @@ class TrajectoryValidator:
         qualified: Dict[int, bool] = {}
         uid_to_hotkey: Dict[int, str] = {}
 
+        # 只处理5个
+        count = 0
         for uid, commitment in active.items():
+            if count >= 5:
+                break
             hotkey = commitment.hotkey
             final = self.compute_final_score_from_ema(hotkey)
             if final > 0:
@@ -940,6 +969,7 @@ class TrajectoryValidator:
                 if total_cost is not None:
                     costs[uid] = total_cost
                 qualified[uid] = self.is_fully_qualified(hotkey)
+                count += 1
 
         if not scores:
             logger.warning("All miners have zero EMA score")

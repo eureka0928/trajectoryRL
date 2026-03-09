@@ -516,6 +516,7 @@ class ClawBenchHarness:
             # Parse JSON output
             output = stdout.decode()
             result_data = self._parse_episode_output(output)
+            logger.info(f"Result data: {result_data}")
 
             # Extract scoring results
             # New format: checks_passed/checks_total (no "score" field)
