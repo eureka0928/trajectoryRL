@@ -954,11 +954,7 @@ class TrajectoryValidator:
         qualified: Dict[int, bool] = {}
         uid_to_hotkey: Dict[int, str] = {}
 
-        # 只处理5个
-        count = 0
         for uid, commitment in active.items():
-            if count >= 5:
-                break
             hotkey = commitment.hotkey
             final = self.compute_final_score_from_ema(hotkey)
             if final > 0:
@@ -969,7 +965,6 @@ class TrajectoryValidator:
                 if total_cost is not None:
                     costs[uid] = total_cost
                 qualified[uid] = self.is_fully_qualified(hotkey)
-                count += 1
 
         if not scores:
             logger.warning("All miners have zero EMA score")
