@@ -712,11 +712,20 @@ class TrajectoryValidator:
         self,
         commitments: Dict[int, MinerCommitment],
     ) -> Dict[int, MinerCommitment]:
-        """Filter commitments to non-validator miners."""
+        """Filter commitments to non-validator miners, excluding blacklisted coldkeys."""
+        blacklist = set(self.config.coldkey_blacklist)
         active: Dict[int, MinerCommitment] = {}
         for uid, commitment in commitments.items():
             if uid < len(self.metagraph.validator_permit) and self.metagraph.validator_permit[uid]:
                 continue
+            if blacklist:
+                coldkey = self.metagraph.coldkeys[uid] if uid < len(self.metagraph.coldkeys) else None
+                if coldkey in blacklist:
+                    logger.info(
+                        f"Miner {uid} ({commitment.hotkey[:8]}): skipping eval "
+                        f"(coldkey {coldkey} is blacklisted)"
+                    )
+                    continue
             active[uid] = commitment
         return active
 
