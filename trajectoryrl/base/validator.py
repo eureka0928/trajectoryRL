@@ -982,13 +982,16 @@ class TrajectoryValidator:
             for name, cfg in self.scenarios.items()
         }
 
-        raw_scores = eval_result["scores"]
+        # v4.0: qualification is binary (LLM judge verdict), no score EMA.
+        # Derive scores from qualified dict: 1.0 if passed, 0.0 if failed.
+        raw_qualified = eval_result.get("qualified") or {}
         raw_costs = eval_result.get("costs") or {}
 
-        # Aggregate raw score (weighted mean across scenarios)
-        total_w = sum(scenario_weights.get(s, 1.0) for s in raw_scores)
+        # Aggregate raw score (weighted mean of binary qualification)
+        total_w = sum(scenario_weights.get(s, 1.0) for s in raw_qualified)
         raw_score = (
-            sum(scenario_weights.get(s, 1.0) * v for s, v in raw_scores.items()) / total_w
+            sum(scenario_weights.get(s, 1.0) * (1.0 if q else 0.0)
+                for s, q in raw_qualified.items()) / total_w
             if total_w > 0 else 0.0
         )
 
@@ -1001,12 +1004,11 @@ class TrajectoryValidator:
 
         # Per-scenario results
         scenario_results: Dict[str, Any] = {}
-        for sname, raw_s in raw_scores.items():
+        for sname, q in raw_qualified.items():
             entry: Dict[str, Any] = {
-                "score": round(raw_s, 4),
-                "ema_score": round(self.ema_scores.get(hotkey, {}).get(sname, 0.0), 4),
+                "score": 1.0 if q else 0.0,
                 "weight": round(scenario_weights.get(sname, 1.0), 4),
-                "qualified": (eval_result.get("qualified") or {}).get(sname, False),
+                "qualified": q,
             }
             if sname in raw_costs:
                 entry["cost"] = round(raw_costs[sname], 4)
@@ -1025,7 +1027,7 @@ class TrajectoryValidator:
             miner_uid=uid,
             block_height=block_height,
             score=round(raw_score, 4),
-            ema_score=round(self.compute_final_score_from_ema(hotkey), 4),
+            ema_score=round(raw_score, 4),
             cost=round(raw_cost, 4),
             ema_cost=round(self.compute_total_cost_from_ema(hotkey) or 0.0, 4),
             weight=0.0,
