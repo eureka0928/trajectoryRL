@@ -94,7 +94,7 @@ class PackIntegrityJudge:
         model: str = "",
         api_key: str = "",
         base_url: str = "",
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
     ):
         self.model = model
         self.api_key = api_key
@@ -281,7 +281,7 @@ class TrajectoryJudge:
         model: str = "",
         api_key: str = "",
         base_url: str = "",
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
     ):
         self.model = model
         self.api_key = api_key
