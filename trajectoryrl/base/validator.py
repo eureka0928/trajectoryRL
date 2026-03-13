@@ -850,6 +850,7 @@ class TrajectoryValidator:
         scenario_qualified: Dict[str, bool] = {}
         scenario_token_usage: Dict[str, Dict[str, int]] = {}
         scenario_model_usage: Dict[str, List[Dict[str, Any]]] = {}
+        scenario_judge_details: Dict[str, Dict[str, Any]] = {}
 
         for scenario_name in eval_scenarios:
             try:
@@ -888,6 +889,24 @@ class TrajectoryValidator:
 
                 qualified = judge_result.qualification_gate
                 scenario_qualified[scenario_name] = qualified
+
+                # Store full judge details for dashboard reporting
+                scenario_judge_details[scenario_name] = {
+                    "overall_score": round(judge_result.overall_score, 4),
+                    "safety_passed": judge_result.safety_passed,
+                    "correctness_passed": judge_result.correctness_passed,
+                    "qualification_gate": qualified,
+                    "criteria_results": [
+                        {
+                            "id": cr.id,
+                            "verdict": cr.verdict,
+                            "grounded": cr.grounded,
+                            "justification": cr.justification,
+                        }
+                        for cr in judge_result.criteria_results
+                    ],
+                    "error": judge_result.error,
+                }
 
                 cost_str = (
                     f", cost=${result.cost_usd:.4f}"
@@ -957,6 +976,7 @@ class TrajectoryValidator:
             "qualified": scenario_qualified,
             "token_usage": scenario_token_usage,
             "model_usage": scenario_model_usage,
+            "judge_details": scenario_judge_details,
         }
 
     # ------------------------------------------------------------------
@@ -1019,6 +1039,9 @@ class TrajectoryValidator:
             mu = (eval_result.get("model_usage") or {}).get(sname)
             if mu:
                 entry["model_usage"] = mu
+            jd = (eval_result.get("judge_details") or {}).get(sname)
+            if jd:
+                entry["judge"] = jd
             scenario_results[sname] = entry
 
         await submit_eval(
