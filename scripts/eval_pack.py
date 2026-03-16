@@ -60,6 +60,9 @@ sys.modules.setdefault("bittensor", _bt)
 from trajectoryrl.utils.clawbench import ClawBenchHarness, EvaluationResult
 from trajectoryrl.utils.opp_schema import validate_opp_schema
 from trajectoryrl.utils.epoch_context import generate_epoch_context, render_context_preamble
+from trajectoryrl.utils.llm_judge import TrajectoryJudge
+
+import yaml
 
 logger = logging.getLogger("eval_pack")
 
@@ -190,6 +193,15 @@ async def run(args) -> int:
     logger.info(f"Model:     {model}")
     logger.info(f"Timeout:   {args.timeout}s/scenario")
 
+    # ── 4b. TrajectoryJudge (Phase 2, same as validator) ─────────────────
+    judge = TrajectoryJudge(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+    )
+    scenarios_path = clawbench_path / "scenarios"
+    logger.info("Judge:     TrajectoryJudge enabled")
+
     # ── 5. Epoch context ──────────────────────────────────────────────────
     seed = args.seed if args.seed is not None else int(time.time()) % 100000
     ctx = generate_epoch_context(seed)
@@ -229,6 +241,35 @@ async def run(args) -> int:
 
         results[sname] = r
 
+        # Phase 2: LLM trajectory judge (same as validator)
+        scenario_yaml = scenarios_path / f"{sname}.yaml"
+        judge_qualified = False
+        judge_score = 0.0
+        if scenario_yaml.exists() and not r.error:
+            with open(scenario_yaml) as f:
+                scenario_config = yaml.safe_load(f)
+            trajectory = r.trajectory or []
+            judge_result = judge.evaluate(
+                scenario_config=scenario_config,
+                trajectory=trajectory,
+                agent_response=r.response,
+            )
+            judge_qualified = judge_result.qualification_gate
+            judge_score = judge_result.overall_score
+            logger.info(
+                f"  judge={judge_score:.3f}  "
+                f"safety={'PASS' if judge_result.safety_passed else 'FAIL'}  "
+                f"correctness={'PASS' if judge_result.correctness_passed else 'FAIL'}"
+            )
+            for cr in judge_result.criteria_results:
+                status = "PASS" if cr.verdict == "PASS" else "FAIL"
+                logger.info(f"    [{status}] {cr.id}: {cr.justification[:120]}")
+            if judge_result.error:
+                logger.error(f"  judge error: {judge_result.error}")
+            # Override gate with judge result
+            r.success = judge_qualified
+            r.score = judge_score
+
         gate = "PASS" if r.success else "FAIL"
         logger.info(f"  score={r.score:.3f}  gate={gate}  calls={r.tool_calls}")
 
@@ -252,51 +293,6 @@ async def run(args) -> int:
 
         if r.error:
             logger.error(f"  error: {r.error}")
-
-        # Extract checks list from rubric (handles both list and dict formats)
-        checks = []
-        if r.rubric:
-            raw = r.rubric.get("checks", r.rubric)
-            if isinstance(raw, list):
-                checks = raw
-            elif isinstance(raw, dict):
-                checks = [
-                    {**v, "id": k} if isinstance(v, dict) else {"id": k, "passed": bool(v)}
-                    for k, v in raw.items()
-                ]
-
-        # Gate=FAIL: always show which checks failed and why
-        if not r.success and checks:
-            failed = [c for c in checks if not c.get("passed")]
-            n_safety_fail = sum(1 for c in failed if c.get("category") == "safety")
-            n_correct_fail = sum(1 for c in failed if c.get("category") == "correctness")
-            logger.info(
-                f"  gate breakdown: {len(failed)} checks failed "
-                f"(safety={n_safety_fail}, correctness={n_correct_fail})"
-            )
-            for c in failed:
-                cat = c.get("category", "?")
-                logger.warning(
-                    f"    FAIL [{cat:11s}] {c.get('id','?'):30s} "
-                    f"{c.get('points',0)}/{c.get('max_points',0)}  "
-                    f"{c.get('description','')}"
-                )
-                detail = c.get("detail", "")
-                if detail:
-                    logger.warning(f"         detail: {detail}")
-
-        # -v: show ALL checks (pass + fail)
-        if args.verbose and checks:
-            logger.info("  full rubric:")
-            for c in checks:
-                st = "PASS" if c.get("passed") else "FAIL"
-                logger.info(
-                    f"    [{st}] {c.get('id','?'):30s} "
-                    f"{c.get('points',0)}/{c.get('max_points',0)}  "
-                    f"{c.get('description','')}"
-                )
-                if not c.get("passed"):
-                    logger.info(f"           {c.get('detail','')}")
 
         logger.info("")
 
