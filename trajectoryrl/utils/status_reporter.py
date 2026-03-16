@@ -1,8 +1,4 @@
-"""Node status reporting to the TrajectoryRL web dashboard.
-
-Sends POST /api/nodes/report with sr25519-signed payloads so the
-dashboard can track online nodes.
-"""
+"""Validator status reporting to the TrajectoryRL web dashboard."""
 
 import logging
 import os
@@ -16,70 +12,9 @@ from trajectoryrl import __version__
 logger = logging.getLogger(__name__)
 
 _BASE_URL = os.getenv("TRAJECTORYRL_API_BASE_URL", "https://trajrl.com")
-DEFAULT_REPORT_URL = f"{_BASE_URL}/api/nodes/report"
 DEFAULT_HEARTBEAT_URL = f"{_BASE_URL}/api/validators/heartbeat"
 DEFAULT_SUBMIT_URL = f"{_BASE_URL}/api/scores/submit"
-
-
-async def report_status(
-    wallet,
-    node_type: str,
-    uptime: int,
-    *,
-    status: str = "online",
-    report_url: str = DEFAULT_REPORT_URL,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> bool:
-    """Report node status to the dashboard API.
-
-    Args:
-        wallet: bt.Wallet with accessible hotkey for signing.
-        node_type: ``"miner"`` or ``"validator"``.
-        uptime: Node uptime in seconds.
-        status: Current status string (default ``"online"``).
-        report_url: Dashboard report endpoint.
-        metadata: Arbitrary key-value metadata to attach.
-
-    Returns:
-        True on successful report (HTTP 200), False otherwise.
-    """
-    try:
-        hotkey_kp = wallet.hotkey
-    except Exception:
-        logger.debug("Skipping status report: wallet hotkey not available")
-        return False
-    hotkey_addr = hotkey_kp.ss58_address
-    timestamp = int(time.time())
-
-    message = f"trajectoryrl-report:{hotkey_addr}:{timestamp}"
-    sig = hotkey_kp.sign(message.encode())
-    signature = "0x" + (sig if isinstance(sig, bytes) else bytes(sig)).hex()
-
-    payload: Dict[str, Any] = {
-        "hotkey": hotkey_addr,
-        "nodeType": node_type,
-        "version": __version__,
-        "status": status,
-        "uptime": uptime,
-        "timestamp": timestamp,
-        "signature": signature,
-    }
-    if metadata:
-        payload["metadata"] = metadata
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(report_url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            logger.debug("Status reported (hotkey=%s...)", hotkey_addr[:8])
-            return True
-        logger.warning(
-            "Status report failed: %d %s", resp.status_code, resp.text[:200]
-        )
-        return False
-    except Exception as e:
-        logger.warning("Status report error: %s", e)
-        return False
+DEFAULT_PRE_EVAL_URL = f"{_BASE_URL}/api/miners/pre-eval"
 
 
 async def heartbeat(
@@ -87,6 +22,7 @@ async def heartbeat(
     *,
     heartbeat_url: str = DEFAULT_HEARTBEAT_URL,
     last_set_weights_at: Optional[int] = None,
+    last_eval_at: Optional[int] = None,
 ) -> bool:
     """Send a validator heartbeat to the dashboard API.
 
@@ -94,6 +30,7 @@ async def heartbeat(
         wallet: bt.Wallet with accessible hotkey for signing.
         heartbeat_url: Dashboard heartbeat endpoint.
         last_set_weights_at: Unix timestamp of most recent set_weights call.
+        last_eval_at: Unix timestamp of most recent completed full eval cycle.
 
     Returns:
         True on success (HTTP 200), False otherwise.
@@ -118,6 +55,8 @@ async def heartbeat(
     }
     if last_set_weights_at is not None:
         payload["last_set_weights_at"] = last_set_weights_at
+    if last_eval_at is not None:
+        payload["last_eval_at"] = last_eval_at
 
     try:
         async with httpx.AsyncClient() as client:
@@ -132,6 +71,43 @@ async def heartbeat(
     except Exception as e:
         logger.warning("Heartbeat error: %s", e)
         return False
+
+
+async def pre_eval(
+    miner_hotkey: str,
+    pack_hash: str,
+    pack_url: Optional[str] = None,
+    *,
+    pre_eval_url: str = DEFAULT_PRE_EVAL_URL,
+) -> Optional[Dict[str, Any]]:
+    """Call the pre-eval API to check whether a miner's submission is allowed.
+
+    Args:
+        miner_hotkey: Miner hotkey to check.
+        pack_hash: Pack hash submitted by the miner.
+        pack_url: Pack download URL (required by the server if this hash is new).
+        pre_eval_url: Pre-eval API endpoint.
+
+    Returns:
+        Parsed response dict on success, or None if the request failed.
+        Callers should treat None as "allowed" (fail-open on network errors).
+    """
+    params: Dict[str, Any] = {"hotkey": miner_hotkey, "hash": pack_hash}
+    if pack_url is not None:
+        params["pack_url"] = pack_url
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(pre_eval_url, params=params, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        logger.warning(
+            "Pre-eval check failed: %d %s", resp.status_code, resp.text[:200]
+        )
+        return None
+    except Exception as e:
+        logger.warning("Pre-eval check error: %s", e)
+        return None
 
 
 async def submit_eval(

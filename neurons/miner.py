@@ -73,7 +73,6 @@ def _make_miner(config: MinerConfig):
 async def _run_demo(config: MinerConfig):
     """Periodically fetch the sample pack and submit on-chain."""
     from trajectoryrl.base.miner import TrajectoryMiner
-    from trajectoryrl.utils.status_reporter import report_status
 
     miner = _make_miner(config)
     interval = config.check_interval
@@ -111,12 +110,6 @@ async def _run_demo(config: MinerConfig):
             else:
                 logger.error("Submission failed, retrying next cycle")
 
-            await report_status(
-                miner.wallet,
-                node_type="miner",
-                uptime=int(time.time() - start_time),
-                metadata={"pack_hash": last_hash} if last_hash else None,
-            )
             await asyncio.sleep(interval)
 
         except (KeyboardInterrupt, asyncio.CancelledError):
@@ -145,7 +138,6 @@ async def _run_default(config: MinerConfig):
     """
     from trajectoryrl.base.miner import TrajectoryMiner
     from trajectoryrl.utils.pack_generator import generate_agents_md
-    from trajectoryrl.utils.status_reporter import report_status
 
     # --- Config validation (fail fast) ---
     from trajectoryrl.utils.llm_client import has_api_key
@@ -242,12 +234,6 @@ async def _run_default(config: MinerConfig):
                 # Store for next cycle's improvement prompt
                 previous_agents_md = agents_md
 
-                await report_status(
-                    miner.wallet,
-                    node_type="miner",
-                    uptime=int(time.time() - start_time),
-                    metadata={"pack_hash": last_hash} if last_hash else None,
-                )
                 await asyncio.sleep(interval)
 
             except (KeyboardInterrupt, asyncio.CancelledError):

@@ -57,11 +57,14 @@ from typing import Dict, List, Optional
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import yaml
+
 from trajectoryrl.utils.clawbench import ClawBenchHarness, EvaluationResult
 from trajectoryrl.utils.opp_schema import validate_opp_schema
 from trajectoryrl.utils.github import PackFetcher
 from trajectoryrl.utils.commitments import fetch_all_commitments
 from trajectoryrl.utils.epoch_context import generate_epoch_context, render_context_preamble
+from trajectoryrl.utils.llm_judge import TrajectoryJudge
 
 logger = logging.getLogger("eval_miners")
 
@@ -85,6 +88,8 @@ async def evaluate_single_miner(
     metagraph,
     commitments,
     harness: ClawBenchHarness,
+    judge: TrajectoryJudge,
+    scenarios_path: Path,
     epoch_seed: int,
     context_preamble: str,
     user_context,
@@ -164,6 +169,31 @@ async def evaluate_single_miner(
                     user_context=user_context,
                 )
 
+            # LLM trajectory judge (same as validator)
+            scenario_yaml = scenarios_path / f"{scenario_name}.yaml"
+            if scenario_yaml.exists() and not result.error:
+                with open(scenario_yaml) as f:
+                    scenario_config = yaml.safe_load(f)
+                trajectory = result.trajectory or []
+                judge_result = judge.evaluate(
+                    scenario_config=scenario_config,
+                    trajectory=trajectory,
+                    agent_response=result.response,
+                )
+                result.success = judge_result.qualification_gate
+                result.score = judge_result.overall_score
+
+                logger.info(
+                    f"  judge={judge_result.overall_score:.3f}  "
+                    f"safety={'PASS' if judge_result.safety_passed else 'FAIL'}  "
+                    f"correctness={'PASS' if judge_result.correctness_passed else 'FAIL'}"
+                )
+                for cr in judge_result.criteria_results:
+                    status = "PASS" if cr.verdict == "PASS" else "FAIL"
+                    logger.info(f"    [{status}] {cr.id}: {cr.justification[:120]}")
+                if judge_result.error:
+                    logger.error(f"  judge error: {judge_result.error}")
+
             results[scenario_name] = result
 
             gate = "PASS" if result.success else "FAIL"
@@ -192,26 +222,6 @@ async def evaluate_single_miner(
 
             if result.error:
                 logger.error(f"  Error: {result.error}")
-
-            if result.rubric and args.verbose:
-                logger.info("  Rubric:")
-                checks = result.rubric.get("checks", result.rubric)
-                if isinstance(checks, list):
-                    for check in checks:
-                        status = "PASS" if check.get("passed") else "FAIL"
-                        logger.info(
-                            f"    [{status}] {check.get('id', '?')} "
-                            f"({check.get('points', 0)}/{check.get('max_points', 0)} pts) "
-                            f"- {check.get('description', '')}"
-                        )
-                elif isinstance(checks, dict):
-                    for check_id, check_data in checks.items():
-                        if isinstance(check_data, dict):
-                            status = "PASS" if check_data.get("passed") else "FAIL"
-                            logger.info(
-                                f"    [{status}] {check_id} "
-                                f"({check_data.get('points', 0)}/{check_data.get('max_points', 0)} pts)"
-                            )
 
         except Exception as e:
             logger.error(f"  EXCEPTION: {e}", exc_info=True)
@@ -321,6 +331,14 @@ async def run_evaluation(args):
         clawbench_base_url=base_url,
     )
 
+    judge = TrajectoryJudge(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+    )
+    scenarios_path = clawbench_path / "scenarios"
+    logger.info("Judge: TrajectoryJudge enabled")
+
     # --- 4. Generate epoch context (same as validator) ---
     epoch = current_block // 7200  # eval_interval_blocks default
     epoch_seed = args.seed if args.seed is not None else compute_epoch_seed(epoch, args.netuid)
@@ -352,6 +370,8 @@ async def run_evaluation(args):
             metagraph=metagraph,
             commitments=commitments,
             harness=harness,
+            judge=judge,
+            scenarios_path=scenarios_path,
             epoch_seed=epoch_seed,
             context_preamble=context_preamble,
             user_context=user_context,
