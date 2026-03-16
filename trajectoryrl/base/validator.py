@@ -1406,29 +1406,78 @@ class TrajectoryValidator:
         except Exception as e:
             logger.error(f"Error replaying weights: {e}", exc_info=True)
 
-    async def _set_fallback_weights(self, reason: str = "No eligible miners"):
-        """Set weights to subnet owner UID when no miners qualify.
+    def _fallback_owner_weights(self) -> Optional[Tuple[list, list]]:
+        """Read on-chain weights set by OWNER_UID and return (uids, weights).
 
-        Miner incentive directed to the owner hotkey is burned by the
-        chain (not paid to the owner), so this effectively burns miner
-        emissions until a qualifying miner submits.  The validator must
-        always call set_weights every tempo to avoid deregistration.
+        Returns None if the owner has no weights or the read fails.
         """
         try:
-            # Verify wallet is accessible before attempting on-chain call
+            self.metagraph.sync(subtensor=self.subtensor)
+            W = self.metagraph.W  # (n, n) weight matrix
+            if OWNER_UID >= W.shape[0]:
+                logger.warning(
+                    f"OWNER_UID {OWNER_UID} out of range (metagraph size {W.shape[0]})"
+                )
+                return None
+
+            owner_weights = W[OWNER_UID]
+            # Extract non-zero entries
+            uids = []
+            weights = []
+            for uid, w in enumerate(owner_weights.tolist()):
+                if w > 0:
+                    uids.append(uid)
+                    weights.append(float(w))
+
+            if not uids:
+                logger.warning(
+                    f"Owner UID {OWNER_UID} has no non-zero weights on chain"
+                )
+                return None
+
+            logger.info(
+                f"Copied {len(uids)} weight entries from owner UID {OWNER_UID}"
+            )
+            return uids, weights
+        except Exception as e:
+            logger.warning(f"Failed to read owner weights from chain: {e}")
+            return None
+
+    def _fallback_to_owner(self) -> Tuple[list, list]:
+        """Return weight=1.0 on OWNER_UID only (burns emissions)."""
+        return [OWNER_UID], [1.0]
+
+    async def _set_fallback_weights(self, reason: str = "No eligible miners"):
+        """Set weights when no miners qualify.
+
+        Fallback order:
+        1. Copy on-chain weights from OWNER_UID (UID 74).
+        2. If that fails, set weight=1.0 to OWNER_UID only (burns emissions).
+
+        The validator must always call set_weights every tempo to avoid
+        deregistration.
+        """
+        try:
             _ = self.wallet.hotkey
         except Exception:
             logger.debug("Skipping fallback weights: wallet hotkey not available")
             return
 
         try:
-            uids = [OWNER_UID]
-            weights = [1.0]
+            copied = self._fallback_owner_weights()
+            if copied is not None:
+                uids, weights = copied
+                logger.info(
+                    f"{reason} — copying weights from owner UID {OWNER_UID} "
+                    f"({len(uids)} entries)"
+                )
+            else:
+                uids, weights = self._fallback_to_owner()
+                logger.info(
+                    f"{reason} — setting fallback weight to "
+                    f"owner UID {OWNER_UID}"
+                )
 
-            logger.info(
-                f"{reason} — setting fallback weight to "
-                f"owner UID {OWNER_UID}"
-            )
             self.subtensor.set_weights(
                 netuid=self.config.netuid,
                 wallet=self.wallet,
