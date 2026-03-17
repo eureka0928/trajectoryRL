@@ -84,7 +84,7 @@ class TrajectoryValidator:
         logger.info(f"TrajectoryRL Validator v{__version__}")
         logger.info("=" * 60)
 
-        logger.info("Initializing Bittensor components...")
+        logger.debug("Initializing Bittensor components...")
         self.wallet = bt.Wallet(
             name=config.wallet_name,
             hotkey=config.wallet_hotkey,
@@ -96,7 +96,7 @@ class TrajectoryValidator:
         logger.info(f"Network: {config.network}")
         logger.info(f"Netuid: {config.netuid}")
 
-        logger.info("Initializing ClawBench harness...")
+        logger.debug("Initializing ClawBench harness...")
         self.harness = ClawBenchHarness(
             clawbench_path=config.clawbench_path,
             timeout=config.timeout_per_scenario,
@@ -116,7 +116,7 @@ class TrajectoryValidator:
         judge_base_url = config.judge_base_url or config.clawbench_base_url
         self._judge_model = judge_model
         self._judge_base_url = judge_base_url
-        logger.info("Initializing LLM judges (model=%s)...", judge_model)
+        logger.debug("Initializing LLM judges (model=%s)...", judge_model)
 
         self.integrity_judge = PackIntegrityJudge(
             model=judge_model,
@@ -129,7 +129,7 @@ class TrajectoryValidator:
             base_url=judge_base_url,
         )
 
-        logger.info("Initializing pack fetcher...")
+        logger.debug("Initializing pack fetcher...")
         self.pack_fetcher = PackFetcher(
             cache_dir=config.pack_cache_dir,
         )
@@ -215,12 +215,12 @@ class TrajectoryValidator:
         """Load persisted EMA state from disk."""
         path = self.config.ema_state_path
         if not path.exists():
-            logger.info("No persisted EMA state found, starting fresh")
+            logger.debug("No persisted EMA state found, starting fresh")
             return
         try:
             data = json.loads(path.read_text())
             if data.get("scenario_config_hash") != self._scenario_config_hash:
-                logger.info(
+                logger.debug(
                     "Scenario pool changed, invalidating all EMA state"
                 )
                 return
@@ -241,7 +241,7 @@ class TrajectoryValidator:
             if integrity_cache:
                 self.integrity_judge.load_cache(integrity_cache)
 
-            logger.info(
+            logger.debug(
                 f"Loaded EMA state: {len(self.ema_costs)} hotkeys, "
                 f"{len(self.first_mover_data)} first-mover entries"
             )
@@ -281,7 +281,7 @@ class TrajectoryValidator:
             return
         path = self._eval_cache_path
         if not path.exists():
-            logger.info("No eval cache found, starting fresh")
+            logger.debug("No eval cache found, starting fresh")
             return
         try:
             data = json.loads(path.read_text())
@@ -291,7 +291,7 @@ class TrajectoryValidator:
                 if v.get("last_eval_at", 0) > cutoff
             }
             pruned = len(data) - len(self._eval_cache)
-            logger.info(
+            logger.debug(
                 f"Loaded eval cache: {len(self._eval_cache)} entries"
                 + (f" (pruned {pruned} expired)" if pruned else "")
             )
@@ -402,8 +402,8 @@ class TrajectoryValidator:
         Score EMA removed in v4.0 — qualification is a binary judge verdict.
         """
         if self._ema_pack_hash.get(hotkey) != pack_hash:
-            logger.info(
-                f"Hotkey {hotkey[:8]}: pack changed "
+            self._get_miner_logger(hotkey).info(
+                f"Pack changed "
                 f"({self._ema_pack_hash.get(hotkey, 'none')[:8]} -> {pack_hash[:8]}), "
                 f"resetting EMA"
             )
@@ -488,6 +488,30 @@ class TrajectoryValidator:
                 ),
             ],
         )
+
+        # Per-miner log directory
+        self._miner_log_dir = self.config.log_dir / "miners"
+        self._miner_log_dir.mkdir(parents=True, exist_ok=True)
+        self._miner_loggers: Dict[str, logging.Logger] = {}
+
+    def _get_miner_logger(self, hotkey: str) -> logging.Logger:
+        """Get or create a per-miner file logger (INFO level, no console output)."""
+        if hotkey in self._miner_loggers:
+            return self._miner_loggers[hotkey]
+
+        mlog = logging.getLogger(f"trajectoryrl.miner.{hotkey[:16]}")
+        mlog.setLevel(logging.INFO)
+        mlog.propagate = False  # don't bubble up to root / console
+
+        log_format = "%(asctime)s | %(levelname)-8s | %(message)s"
+        fh = logging.FileHandler(
+            self._miner_log_dir / f"{hotkey[:16]}.log"
+        )
+        fh.setFormatter(logging.Formatter(log_format))
+        mlog.addHandler(fh)
+
+        self._miner_loggers[hotkey] = mlog
+        return mlog
 
     def _load_scenarios(self) -> Dict[str, dict]:
         scenarios = {}
@@ -702,6 +726,8 @@ class TrajectoryValidator:
         await self._compute_and_set_weights(current_block)
         self.last_weight_block = current_block
 
+        cycle_start = time.time()
+
         # Epoch seed for context variation
         epoch = current_block // self.config.eval_interval_blocks
         epoch_seed = self.compute_epoch_seed(epoch, self.config.netuid)
@@ -709,7 +735,7 @@ class TrajectoryValidator:
         context_preamble = render_context_preamble(epoch_ctx)
         user_context = epoch_ctx.to_user_context()
 
-        logger.info(
+        logger.debug(
             f"Eval cycle: block={current_block}, seed={epoch_seed}, "
             f"context=[{epoch_ctx.user_name}, {epoch_ctx.user_role}]"
         )
@@ -720,19 +746,25 @@ class TrajectoryValidator:
         self._pack_by_hash.clear()
 
         # 2. Sync metagraph
-        logger.info("Syncing metagraph...")
+        logger.debug("Syncing metagraph...")
         self.metagraph.sync(subtensor=self.subtensor)
+        logger.info(
+            f"Metagraph synced: {self.metagraph.n} neurons, "
+            f"block {self.metagraph.block}"
+        )
 
         # 3. Read on-chain commitments
-        logger.info("Reading on-chain commitments...")
+        logger.debug("Reading on-chain commitments...")
         commitments = fetch_all_commitments(
             self.subtensor, self.config.netuid, self.metagraph
         )
-        logger.info(f"Found {len(commitments)} valid commitments")
 
         # 4. Filter to non-validator miners
         active_commitments = self._filter_active_commitments(commitments)
-        logger.info(f"Active miners: {len(active_commitments)}")
+        logger.info(
+            f"Commitments: {len(commitments)} total, "
+            f"{len(active_commitments)} active miners"
+        )
 
         if not active_commitments:
             logger.warning("No active miners with valid commitments!")
@@ -756,9 +788,8 @@ class TrajectoryValidator:
             earliest_uid, _ = hash_earliest[commitment.pack_hash]
             if uid != earliest_uid:
                 skip_uids.add(uid)
-                logger.info(
-                    f"Miner {uid} ({commitment.hotkey[:8]}): skipping eval "
-                    f"(duplicate pack_hash={commitment.pack_hash[:12]})"
+                self._get_miner_logger(commitment.hotkey).info(
+                    f"Skipping eval (duplicate pack_hash={commitment.pack_hash[:12]})"
                 )
 
         # 6. Evaluate miners
@@ -782,6 +813,9 @@ class TrajectoryValidator:
         )
         evaluated_count = 0
         attempted_count = 0
+        skipped_interval_count = 0
+        rejected_pre_eval_count = 0
+        cached_count = 0
         total_eligible = len(active_commitments) - len(skip_uids)
         total_scenarios = len(eval_scenarios)
         logger.info(
@@ -801,9 +835,9 @@ class TrajectoryValidator:
                 hotkey, commitment.pack_hash, current_block
             )
             if not needs_eval:
-                logger.info(
-                    f"[{miner_idx}/{total_eligible}] Miner {uid} ({hotkey[:8]}): "
-                    f"skipping, within eval interval"
+                skipped_interval_count += 1
+                self._get_miner_logger(hotkey).info(
+                    f"[{miner_idx}/{total_eligible}] Skipping, within eval interval"
                 )
                 continue
 
@@ -818,10 +852,11 @@ class TrajectoryValidator:
                     commitment.pack_url,
                 )
                 if pre_eval_result is not None and not pre_eval_result.get("allowed", True):
+                    rejected_pre_eval_count += 1
                     reason = pre_eval_result.get("reason", "unknown")
                     logger.info(
-                        f"Miner {uid} ({hotkey[:8]}): pre-eval rejected "
-                        f"(reason={reason}) — skipping eval"
+                        f"[{miner_idx}/{total_eligible}] Miner {uid} ({hotkey[:8]}): "
+                        f"pre-eval rejected (reason={reason}) — skipping eval"
                     )
                     _stage = "integrity_check" if reason == "hardcoded" else "pack_fetch"
                     _detail = (
@@ -857,8 +892,10 @@ class TrajectoryValidator:
 
             # Check eval cache before spending LLM tokens.
             # Pre-eval always runs; cache is keyed by pack_hash.
+            eval_elapsed = 0.0
             cache_hit, cache_result = self._check_eval_cache(commitment.pack_hash)
             if cache_hit:
+                cached_count += 1
                 eval_result = cache_result
                 if cache_result is not None:
                     logger.info(
@@ -876,11 +913,13 @@ class TrajectoryValidator:
                     f"[{miner_idx}/{total_eligible}] Evaluating miner {uid} "
                     f"({hotkey[:8]}) ..."
                 )
+                eval_start = time.time()
                 eval_result = await self._evaluate_miner(
                     uid, commitment, eval_scenarios, epoch_seed,
                     context_preamble, user_context,
                     block_height=current_block,
                 )
+                eval_elapsed = time.time() - eval_start
                 self._update_eval_cache(commitment.pack_hash, eval_result)
 
             if eval_result is not None:
@@ -899,9 +938,11 @@ class TrajectoryValidator:
                 evaluated_count += 1
                 q = eval_result.get("qualified", {})
                 passed = sum(1 for v in q.values() if v)
+                elapsed_str = f" ({eval_elapsed:.1f}s)" if eval_elapsed else ""
                 logger.info(
                     f"[{miner_idx}/{total_eligible}] Miner {uid} done: "
-                    f"{passed}/{len(q)} scenarios passed "
+                    f"{passed}/{len(q)} scenarios passed"
+                    f"{elapsed_str} "
                     f"({evaluated_count} evaluated so far)"
                 )
 
@@ -926,8 +967,10 @@ class TrajectoryValidator:
                     )
 
             else:
+                elapsed_str = f" ({eval_elapsed:.1f}s)" if eval_elapsed else ""
                 logger.info(
-                    f"[{miner_idx}/{total_eligible}] Miner {uid} eval returned None "
+                    f"[{miner_idx}/{total_eligible}] Miner {uid} eval returned None"
+                    f"{elapsed_str} "
                     f"(pack fetch/integrity failed)"
                 )
 
@@ -943,13 +986,25 @@ class TrajectoryValidator:
                 await self._replay_last_weights()
                 self.last_weight_block = mid_block
 
-        logger.info(f"Evaluated {evaluated_count}/{attempted_count} miners this cycle")
+        parts = [f"{evaluated_count} evaluated"]
+        if cached_count:
+            parts.append(f"{cached_count} cached")
+        if rejected_pre_eval_count:
+            parts.append(f"{rejected_pre_eval_count} pre-eval rejected")
+        if skipped_interval_count:
+            parts.append(f"{skipped_interval_count} skipped (interval)")
+        failed_count = attempted_count - evaluated_count
+        if failed_count > 0:
+            parts.append(f"{failed_count} failed")
+        cycle_elapsed = time.time() - cycle_start
+        cycle_min = cycle_elapsed / 60
+        logger.info(
+            f"Eval cycle complete ({cycle_min:.1f}min): {total_eligible} eligible, "
+            + ", ".join(parts)
+        )
 
-        # Log EMA cost summary for all active miners
+        # Log EMA cost summary to per-miner files
         if evaluated_count > 0:
-            logger.info("-" * 40)
-            logger.info("COST EMA SUMMARY (all active miners)")
-            logger.info("-" * 40)
             for uid, commitment in active_commitments.items():
                 hk = commitment.hotkey
                 ema_cost = self.compute_total_cost_from_ema(hk)
@@ -958,11 +1013,9 @@ class TrajectoryValidator:
                     scenario_str = ", ".join(
                         f"{s}=${c:.4f}" for s, c in sorted(per_scenario.items())
                     )
-                    logger.info(
-                        f"  Miner {uid} ({hk[:8]}): "
-                        f"ema_total=${ema_cost:.4f} ({scenario_str})"
+                    self._get_miner_logger(hk).info(
+                        f"EMA cost: total=${ema_cost:.4f} ({scenario_str})"
                     )
-            logger.info("-" * 40)
 
         # All attempted evaluations failed — likely an LLM API issue
         if attempted_count > 0 and evaluated_count == 0:
@@ -990,8 +1043,8 @@ class TrajectoryValidator:
         - Never evaluated before
         """
         if self._ema_pack_hash.get(hotkey) != pack_hash:
-            logger.info(
-                f"Hotkey {hotkey[:8]}: pack_hash changed, marking for eval"
+            self._get_miner_logger(hotkey).info(
+                f"pack_hash changed, marking for eval"
             )
             return True
 
@@ -1018,9 +1071,8 @@ class TrajectoryValidator:
             if blacklist:
                 coldkey = self.metagraph.coldkeys[uid] if uid < len(self.metagraph.coldkeys) else None
                 if coldkey in blacklist:
-                    logger.info(
-                        f"Miner {uid} ({commitment.hotkey[:8]}): skipping eval "
-                        f"(coldkey {coldkey} is blacklisted)"
+                    self._get_miner_logger(commitment.hotkey).info(
+                        f"Skipping eval (coldkey {coldkey} is blacklisted)"
                     )
                     continue
             active[uid] = commitment
@@ -1049,9 +1101,9 @@ class TrajectoryValidator:
             if last_block is not None:
                 blocks_since = current_block - last_block
                 if blocks_since > self.config.inactivity_blocks:
-                    logger.info(
-                        f"Miner {uid} ({hotkey[:8]}): inactive for "
-                        f"{blocks_since} blocks > {self.config.inactivity_blocks}, "
+                    self._get_miner_logger(hotkey).info(
+                        f"Inactive for {blocks_since} blocks > "
+                        f"{self.config.inactivity_blocks}, "
                         f"removing first-mover protection"
                     )
                     self.first_mover_data.pop(hotkey, None)
@@ -1079,24 +1131,23 @@ class TrajectoryValidator:
         """
         prev_uid = self._hotkey_uid_map.get(hotkey)
         if prev_uid is not None and prev_uid != miner_uid:
-            logger.info(
-                f"Miner {miner_uid}: hotkey {hotkey[:8]} previously at UID "
-                f"{prev_uid}; re-registration detected, resetting first-mover data"
+            self._get_miner_logger(hotkey).info(
+                f"Previously at UID {prev_uid}; "
+                f"re-registration detected, resetting first-mover data"
             )
             self.first_mover_data.pop(hotkey, None)
         self._hotkey_uid_map[hotkey] = miner_uid
 
         if hotkey not in self.first_mover_data:
             self.first_mover_data[hotkey] = (cost, block_number)
-            logger.info(
-                f"Miner {miner_uid}: First submission "
-                f"(cost=${cost:.4f}, block={block_number:.0f})"
+            self._get_miner_logger(hotkey).info(
+                f"First submission (cost=${cost:.4f}, block={block_number:.0f})"
             )
         elif cost < self.first_mover_data[hotkey][0]:
             original_block = self.first_mover_data[hotkey][1]
             self.first_mover_data[hotkey] = (cost, original_block)
-            logger.info(
-                f"Miner {miner_uid}: Cost improved to ${cost:.4f}"
+            self._get_miner_logger(hotkey).info(
+                f"Cost improved to ${cost:.4f}"
             )
 
     # ------------------------------------------------------------------
@@ -1127,7 +1178,8 @@ class TrajectoryValidator:
             Dict with keys "costs", "qualified" mapping
             scenario_name to values, or None if pre-evaluation checks fail.
         """
-        logger.info(
+        mlog = self._get_miner_logger(commitment.hotkey)
+        mlog.info(
             f"Evaluating miner {miner_uid} "
             f"(hotkey={commitment.hotkey[:8]}, hash={commitment.pack_hash[:12]}...)"
         )
@@ -1139,9 +1191,8 @@ class TrajectoryValidator:
         )
 
         if not verification.valid:
-            logger.warning(
-                f"Miner {miner_uid}: Pack verification failed: "
-                f"{verification.error}"
+            mlog.warning(
+                f"Pack verification failed: {verification.error}"
             )
             return None
 
@@ -1150,9 +1201,7 @@ class TrajectoryValidator:
         # Step 2: Schema validation
         lint_result = validate_opp_schema(pack)
         if not lint_result.passed:
-            logger.warning(
-                f"Miner {miner_uid}: Schema failed: {lint_result.issues}"
-            )
+            mlog.warning(f"Schema failed: {lint_result.issues}")
             return None
 
         # Step 3: Phase 1 — LLM pack integrity analysis (cached by pack_hash)
@@ -1160,11 +1209,9 @@ class TrajectoryValidator:
             pack, pack_hash=commitment.pack_hash
         )
         if not integrity.passed:
-            logger.warning(
-                f"Miner {miner_uid}: Pack integrity FAILED: {integrity.summary}"
-            )
+            mlog.warning(f"Pack integrity FAILED: {integrity.summary}")
             for flag in integrity.flags:
-                logger.warning(
+                mlog.info(
                     f"  Flag: {flag.type} ({flag.severity}): {flag.explanation}"
                 )
             asyncio.ensure_future(
@@ -1191,9 +1238,8 @@ class TrajectoryValidator:
             return None
 
         if integrity.flags:
-            logger.info(
-                f"Miner {miner_uid}: Integrity passed with "
-                f"{len(integrity.flags)} non-critical flags"
+            mlog.info(
+                f"Integrity passed with {len(integrity.flags)} non-critical flags"
             )
 
         self._hotkey_packs[commitment.hotkey] = pack
@@ -1208,9 +1254,8 @@ class TrajectoryValidator:
 
         total_scenarios = len(eval_scenarios)
         for scenario_idx, scenario_name in enumerate(eval_scenarios, 1):
-            logger.info(
-                f"Miner {miner_uid}: scenario [{scenario_idx}/{total_scenarios}] "
-                f"{scenario_name} ..."
+            mlog.info(
+                f"scenario [{scenario_idx}/{total_scenarios}] {scenario_name} ..."
             )
             try:
                 # Single episode per scenario (no consensus voting in v4.0)
@@ -1223,16 +1268,14 @@ class TrajectoryValidator:
                 )
 
                 if result.error:
-                    logger.warning(
-                        f"Miner {miner_uid}: {scenario_name} episode error: "
-                        f"{result.error}"
+                    mlog.warning(
+                        f"{scenario_name} episode error: {result.error}"
                     )
                     scenario_qualified[scenario_name] = False
                     remaining = [s for s in eval_scenarios if s not in scenario_qualified]
                     if remaining:
-                        logger.info(
-                            f"Miner {miner_uid}: fail-fast, "
-                            f"skipping {len(remaining)} remaining scenarios"
+                        mlog.info(
+                            f"fail-fast, skipping {len(remaining)} remaining scenarios"
                         )
                         for s in remaining:
                             scenario_qualified[s] = False
@@ -1278,15 +1321,15 @@ class TrajectoryValidator:
                     else ""
                 )
                 gate_str = "PASS" if qualified else "FAIL"
-                logger.info(
-                    f"Miner {miner_uid}: {scenario_name} -> "
+                mlog.info(
+                    f"{scenario_name} -> "
                     f"judge={judge_result.overall_score:.3f}{cost_str}, "
                     f"gate={gate_str}, tool_calls={result.tool_calls}"
                 )
                 if result.token_usage:
                     tu = result.token_usage
-                    logger.info(
-                        f"Miner {miner_uid}: {scenario_name}   "
+                    mlog.info(
+                        f"{scenario_name}   "
                         f"tokens: input={tu.get('input_tokens', 0)}, "
                         f"output={tu.get('output_tokens', 0)}, "
                         f"cache_read={tu.get('cache_read_tokens', 0)}, "
@@ -1294,21 +1337,18 @@ class TrajectoryValidator:
                     )
 
                 if judge_result.error:
-                    logger.warning(
-                        f"Miner {miner_uid}: {scenario_name} judge error: "
-                        f"{judge_result.error}"
+                    mlog.warning(
+                        f"{scenario_name} judge error: {judge_result.error}"
                     )
 
                 # Log per-criterion details
                 for cr in judge_result.criteria_results:
                     if cr.verdict != "PASS":
-                        logger.info(
-                            f"  FAIL {cr.id}: {cr.justification}"
-                        )
+                        mlog.info(f"  FAIL {cr.id}: {cr.justification}")
                 if result.model_usage:
                     for m in result.model_usage:
-                        logger.info(
-                            f"Miner {miner_uid}: {scenario_name}   "
+                        mlog.info(
+                            f"{scenario_name}   "
                             f"{m.get('model', '?')}: "
                             f"${m.get('cost_usd', 0):.4f} "
                             f"({m.get('count', 0)} calls)"
@@ -1318,8 +1358,8 @@ class TrajectoryValidator:
                 if not qualified:
                     remaining = [s for s in eval_scenarios if s not in scenario_qualified]
                     if remaining:
-                        logger.info(
-                            f"Miner {miner_uid}: fail-fast on {scenario_name}, "
+                        mlog.info(
+                            f"fail-fast on {scenario_name}, "
                             f"skipping {len(remaining)} remaining scenarios"
                         )
                         for s in remaining:
@@ -1327,15 +1367,14 @@ class TrajectoryValidator:
                     break
 
             except Exception as e:
-                logger.error(
-                    f"Miner {miner_uid}: {scenario_name} failed: {e}",
-                    exc_info=True,
+                mlog.error(
+                    f"{scenario_name} failed: {e}", exc_info=True,
                 )
                 scenario_qualified[scenario_name] = False
                 remaining = [s for s in eval_scenarios if s not in scenario_qualified]
                 if remaining:
-                    logger.info(
-                        f"Miner {miner_uid}: fail-fast on {scenario_name} exception, "
+                    mlog.info(
+                        f"fail-fast on {scenario_name} exception, "
                         f"skipping {len(remaining)} remaining scenarios"
                     )
                     for s in remaining:
@@ -1343,7 +1382,7 @@ class TrajectoryValidator:
                 break
 
         if not scenario_qualified:
-            logger.warning(f"Miner {miner_uid}: No scenario results!")
+            mlog.warning("No scenario results!")
             return None
 
         # Log per-miner cost summary
@@ -1352,10 +1391,7 @@ class TrajectoryValidator:
             cost_details = ", ".join(
                 f"{s}=${c:.4f}" for s, c in scenario_costs.items()
             )
-            logger.info(
-                f"Miner {miner_uid}: Cost summary: "
-                f"total=${total_cost:.4f} ({cost_details})"
-            )
+            mlog.info(f"Cost summary: total=${total_cost:.4f} ({cost_details})")
 
         return {
             "costs": scenario_costs,
