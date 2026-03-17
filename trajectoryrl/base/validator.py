@@ -843,16 +843,6 @@ class TrajectoryValidator:
                 continue
 
             miner_idx += 1
-            needs_eval = self._needs_evaluation(
-                hotkey, commitment.pack_hash, current_block
-            )
-            if not needs_eval:
-                skipped_interval_count += 1
-                self._get_miner_logger(hotkey).info(
-                    f"[{miner_idx}/{total_eligible}] Skipping, within eval interval"
-                )
-                continue
-
             # Pre-eval gate: ask the server whether this miner's submission
             # is allowed before spending LLM tokens on a full evaluation.
             # Controlled by TRAJECTORYRL_PRE_EVAL_ENABLED (default: 1).
@@ -901,12 +891,22 @@ class TrajectoryValidator:
                             rejection_detail=_detail,
                         )
                     )
-                    # Clear EMA state so weight phase doesn't score this miner
-                    # using stale historical data from before the rejection.
+                    # Clear stale EMA state so rejected miners cannot
+                    # retain weight from a previous successful evaluation.
                     self.ema_costs.pop(hotkey, None)
                     self.scenario_qualified.pop(hotkey, None)
                     self._ema_pack_hash.pop(hotkey, None)
                     continue
+            
+            needs_eval = self._needs_evaluation(
+                hotkey, commitment.pack_hash, current_block
+            )
+            if not needs_eval:
+                skipped_interval_count += 1
+                self._get_miner_logger(hotkey).info(
+                    f"[{miner_idx}/{total_eligible}] Skipping, within eval interval"
+                )
+                continue
 
             # Check eval cache before spending LLM tokens.
             # Pre-eval always runs; cache is keyed by pack_hash.
