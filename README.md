@@ -216,12 +216,29 @@ python scripts/run_batch.py
 
 See [MINER_OPERATIONS.md](MINER_OPERATIONS.md) for full details: automated mode, S3 upload, pack format, and scoring targets.
 
+## trajrl CLI
+
+A standalone CLI for querying live subnet data — validators, miners, scores, submissions, and eval logs. Designed for both humans and AI agents (Claude Code, Cursor).
+
+```bash
+pip install trajrl
+
+trajrl status                       # Network health overview
+trajrl validators                   # List all validators
+trajrl scores <validator_hotkey>    # Per-miner scores from a validator
+trajrl miner <hotkey>               # Miner detail + diagnostics
+trajrl submissions --failed         # Recent failed submissions
+```
+
+Outputs JSON automatically when piped, Rich tables when interactive. See [trajrl/README.md](trajrl/README.md) for full documentation.
+
 ## Documentation
 
 - **[Incentive Mechanism](INCENTIVE_MECHANISM.md)** — Scoring, rewards, winner-take-all, and anti-copy protection
 - **[Validator Operations](VALIDATOR_OPERATIONS.md)** — Cost model, auto-updates, and operational guidance
 - **[Miner Operations](MINER_OPERATIONS.md)** — Pack format, run modes, local testing, and submission workflow
 - **[ClawBench](https://github.com/trajectoryRL/clawbench)** — Evaluation framework (scenarios, fixtures, scoring)
+- **[trajrl CLI](trajrl/README.md)** — Query live subnet data from the terminal
 
 ## Community
 
