@@ -345,6 +345,57 @@ def display_submissions(data: dict, failed_only: bool = False) -> None:
     console.print(table)
 
 
+def display_eval_history(data: dict, validator: str | None = None) -> None:
+    """Show a deduplicated list of eval cycle IDs."""
+    logs = data.get("logs", [])
+    seen: dict[str, dict] = {}
+    for log in logs:
+        eid = log.get("evalId", "")
+        if eid and eid not in seen:
+            seen[eid] = log
+
+    title = f"Eval IDs ({len(seen)})"
+    if validator:
+        title += f" — {trunc(validator)}"
+    table = Table(title=title)
+    table.add_column("Eval ID", style="bold")
+    table.add_column("Validator", style="cyan")
+    table.add_column("Block", justify="right")
+    table.add_column("Logs", justify="right")
+    table.add_column("Created")
+
+    log_counts: dict[str, int] = {}
+    for log in logs:
+        eid = log.get("evalId", "")
+        log_counts[eid] = log_counts.get(eid, 0) + 1
+
+    for eid, entry in seen.items():
+        table.add_row(
+            eid,
+            trunc(entry.get("validatorHotkey")),
+            str(entry.get("blockHeight") or "—"),
+            str(log_counts.get(eid, 0)),
+            relative_time(entry.get("createdAt")),
+        )
+    console.print(table)
+
+
+def display_cycle_log(data: dict) -> None:
+    """Show cycle log metadata and raw text content."""
+    log_entry = data.get("log_entry", {})
+    text = data.get("text", "")
+
+    lines = [
+        f"  Eval ID: [bold]{log_entry.get('evalId', '—')}[/]",
+        f"  Validator: [cyan]{trunc(log_entry.get('validatorHotkey'))}[/]",
+        f"  Block: {log_entry.get('blockHeight', '—')}",
+        f"  Size: {size_fmt(log_entry.get('sizeBytes'))}",
+        f"  Created: {relative_time(log_entry.get('createdAt'))}",
+    ]
+    console.print(Panel("\n".join(lines), title="Cycle Log", border_style="cyan"))
+    console.print(text)
+
+
 def display_logs(data: dict) -> None:
     logs = data.get("logs", [])
     table = Table(title=f"Eval Logs ({len(logs)})")

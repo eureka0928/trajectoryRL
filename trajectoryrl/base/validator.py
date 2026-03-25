@@ -765,15 +765,33 @@ class TrajectoryValidator:
     # ------------------------------------------------------------------
 
     async def _run_evaluation_cycle(self, current_block: int):
-        """Run one evaluation cycle.
+        """Run one evaluation cycle with guaranteed cycle log upload.
 
-        1. Sync metagraph, read on-chain commitments
-        2. For each miner hotkey with valid commitment:
-           - If pack_hash changed since last eval: mark for re-evaluation
-           - If time since last eval >= eval_interval: mark for re-evaluation
-        3. Evaluate marked packs on the full scenario set
-        4. Update per-scenario EMA for evaluated packs
-        5. Set weights from EMA scores
+        Wraps _execute_evaluation_cycle in try/finally to ensure the
+        cycle-level validator log is always uploaded to the dashboard,
+        regardless of early returns (no LLM key, no miners) or exceptions.
+        """
+        cycle_start = time.time()
+        cycle_log_offset = self._get_validator_log_offset()
+        cycle_eval_id = time.strftime("%Y%m%d_%H%M%S")
+        try:
+            await self._execute_evaluation_cycle(
+                current_block, cycle_eval_id, cycle_start,
+            )
+        finally:
+            asyncio.ensure_future(
+                self._fire_upload_cycle_logs(
+                    cycle_eval_id, cycle_log_offset, current_block,
+                )
+            )
+
+    async def _execute_evaluation_cycle(
+        self,
+        current_block: int,
+        cycle_eval_id: str,
+        cycle_start: float,
+    ):
+        """Execute the full evaluation cycle logic.
 
         Falls back to owner UID weights when LLM keys are missing or
         all evaluations fail (likely LLM API errors).
@@ -796,10 +814,6 @@ class TrajectoryValidator:
         logger.info("Setting weights from previous eval before starting eval cycle")
         await self._compute_and_set_weights(current_block)
         self.last_weight_block = current_block
-
-        cycle_start = time.time()
-        cycle_log_offset = self._get_validator_log_offset()
-        cycle_eval_id = time.strftime("%Y%m%d_%H%M%S")
 
         # Epoch seed for context variation
         epoch = current_block // self.config.eval_interval_blocks
@@ -1160,18 +1174,10 @@ class TrajectoryValidator:
                 "Setting fallback weights to owner UID."
             )
             self._eval_fallback_active = True
-            asyncio.ensure_future(
-                self._fire_upload_cycle_logs(cycle_eval_id, cycle_log_offset, current_block)
-            )
             await self._set_fallback_weights(
                 reason="All evaluations failed (LLM error)"
             )
             return
-
-        # Upload cycle-level validator log (fire-and-forget)
-        asyncio.ensure_future(
-            self._fire_upload_cycle_logs(cycle_eval_id, cycle_log_offset, current_block)
-        )
 
         # Eval completed successfully — clear fallback flag so tempo
         # refreshes use real computed weights.
