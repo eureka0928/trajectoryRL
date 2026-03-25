@@ -1,10 +1,10 @@
-# Scripts
+# Tools
 
-Standalone diagnostic tools for the TrajectoryRL subnet. These scripts are **not** part of the `trajrl` CLI package — they live in `tools/` and are run directly with `python3`.
+A collection of standalone diagnostic and analysis tools for the TrajectoryRL subnet. Each tool targets a specific operational need — validator inspection, pack deduplication check, etc. They are independent of the `trajrl` CLI package and run directly with `python3`.
 
-## analyze_validator.py
+## analyze_validator.py — Validator evaluation analysis
 
-Interactive analysis of a validator's evaluation behavior: score distribution, miner qualification, cost breakdown, weight allocation, and per-miner drill-down.
+Interactively inspect a validator's evaluation behavior: score distribution, miner qualification, cost breakdown, weight allocation, and per-miner drill-down.
 
 ### Usage
 
@@ -30,7 +30,7 @@ Requires the `trajrl` package (from `trajrl/`). Install with:
 pip install -e trajrl/
 ```
 
-## compare_pack_ncd.py
+## compare_pack_ncd.py — Pack deduplication similarity check
 
 Computes NCD (Normalized Compression Distance) similarity between two packs' `AGENTS.md` files, using the same algorithm as the validator's deduplication layer (`trajectoryrl.utils.ncd`).
 
