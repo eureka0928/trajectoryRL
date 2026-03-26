@@ -42,6 +42,7 @@ from ..utils.commitments import MinerCommitment, fetch_all_commitments
 from ..utils.ncd import deduplicate_packs
 from ..utils.status_reporter import (
     heartbeat, pre_eval, submit_eval, upload_eval_logs, upload_cycle_logs,
+    fetch_weight_override,
 )
 from ..utils.llm_judge import PackIntegrityJudge, TrajectoryJudge
 from .. import __version__
@@ -598,7 +599,8 @@ class TrajectoryValidator:
                             f"Pre-launch phase (block {current_block} < "
                             f"{EVAL_START_BLOCK}), setting fallback weights"
                         )
-                        await self._set_fallback_weights()
+                        if not await self._apply_weight_override():
+                            await self._set_fallback_weights()
                         self.last_weight_block = current_block
                     await asyncio.sleep(60)
                     continue
@@ -636,12 +638,13 @@ class TrajectoryValidator:
                         f"Tempo weight refresh at block {current_block} "
                         f"({blocks_since_weights} blocks since last)"
                     )
-                    if self._eval_fallback_active:
-                        await self._set_fallback_weights(
-                            reason="Eval cycle in fallback mode"
-                        )
-                    else:
-                        await self._compute_and_set_weights(current_block)
+                    if not await self._apply_weight_override():
+                        if self._eval_fallback_active:
+                            await self._set_fallback_weights(
+                                reason="Eval cycle in fallback mode"
+                            )
+                        else:
+                            await self._compute_and_set_weights(current_block)
                     self.last_weight_block = current_block
 
                 await asyncio.sleep(60)
@@ -1130,7 +1133,8 @@ class TrajectoryValidator:
                     f"Mid-eval tempo refresh at block {mid_block} "
                     f"({mid_block - self.last_weight_block} blocks since last set_weights)"
                 )
-                await self._replay_last_weights()
+                if not await self._apply_weight_override():
+                    await self._replay_last_weights()
                 self.last_weight_block = mid_block
 
         parts = [f"{evaluated_count} evaluated"]
@@ -1983,6 +1987,77 @@ class TrajectoryValidator:
     # ------------------------------------------------------------------
     # Weight setting
     # ------------------------------------------------------------------
+
+    async def _apply_weight_override(self) -> bool:
+        """Check for a forced weight override and apply it if active.
+
+        Only activated in exceptional circumstances (e.g. consensus
+        divergence) to save validator vtrust by forcing a known-good
+        winner UID from the server side.
+
+        Returns True if an override was applied (caller should skip normal
+        weight setting), False otherwise.
+        """
+        from datetime import datetime, timezone
+
+        override = await fetch_weight_override(self.wallet)
+        if override is None:
+            return False
+
+        expires_str = override.get("expiresAt")
+        winner_uid = override.get("winnerUid")
+        if expires_str is None or winner_uid is None:
+            return False
+
+        try:
+            expires_at = datetime.fromisoformat(
+                expires_str.replace("+00", "+00:00")
+            )
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            if now >= expires_at:
+                logger.info(
+                    "Weight override expired at %s, ignoring", expires_str
+                )
+                return False
+        except Exception as e:
+            logger.warning("Failed to parse override expiresAt: %s", e)
+            return False
+
+        if winner_uid == OWNER_UID:
+            uids = [OWNER_UID]
+            weights = [1.0]
+            logger.info(
+                "Weight override: winnerUid=%d is owner UID, "
+                "setting weight 1.0 to owner UID %d",
+                winner_uid, OWNER_UID,
+            )
+        else:
+            uids = [int(winner_uid), OWNER_UID]
+            weights = [0.5, 0.5]
+            logger.info(
+                "Weight override: setting weight 0.5 to winnerUid %d "
+                "and 0.5 to owner UID %d",
+                winner_uid, OWNER_UID,
+            )
+
+        try:
+            self.subtensor.set_weights(
+                netuid=self.config.netuid,
+                wallet=self.wallet,
+                uids=uids,
+                weights=weights,
+                wait_for_inclusion=True,
+                wait_for_finalization=False,
+            )
+            logger.info("Weight override applied successfully")
+            self._last_set_weights_at = int(time.time())
+            self._last_weights_uids = uids
+            self._last_weights = weights
+        except Exception as e:
+            logger.error("Error applying weight override: %s", e, exc_info=True)
+        return True
 
     async def _compute_and_set_weights(self, current_block: int):
         """Compute weights from EMA scores, set on-chain, and cache the result.
