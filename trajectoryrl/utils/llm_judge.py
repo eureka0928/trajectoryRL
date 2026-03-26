@@ -130,7 +130,11 @@ class PackIntegrityJudge:
             return self._cache[pack_hash]
 
         result = self._run_integrity_check(pack)
-        self._cache[pack_hash] = result
+        # Only cache deterministic results from actual LLM evaluation.
+        # Transient errors (API timeout, connection refused, etc.) should
+        # not poison the cache — the next eval cycle should retry.
+        if not result.error:
+            self._cache[pack_hash] = result
         return result
 
     def _run_integrity_check(self, pack: dict) -> IntegrityResult:
