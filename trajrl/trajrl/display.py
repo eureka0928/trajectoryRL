@@ -396,6 +396,65 @@ def display_cycle_log(data: dict) -> None:
     console.print(text)
 
 
+def display_cycle_log_summary(data: dict) -> None:
+    """Parse and display cycle log as structured summary tables."""
+    log_entry = data.get("log_entry", {})
+    text = data.get("text", "")
+
+    # Display metadata
+    lines = [
+        f"  Eval ID: [bold]{log_entry.get('evalId', '—')}[/]",
+        f"  Validator: [cyan]{trunc(log_entry.get('validatorHotkey'))}[/]",
+        f"  Block: {log_entry.get('blockHeight', '—')}",
+        f"  Created: {relative_time(log_entry.get('createdAt'))}",
+    ]
+    console.print(Panel("\n".join(lines), title="Cycle Summary", border_style="cyan"))
+
+    # Parse key metrics from log text
+    import re
+
+    # Extract cycle completion line
+    match = re.search(r"Eval cycle complete.*?(\d+\.\d+)min.*?(\d+) eligible.*?(\d+) evaluated.*?(\d+) cached.*?(\d+) pre-eval rejected.*?(\d+) NCD rejected", text)
+    if match:
+        duration, eligible, evaluated, cached, pre_rejected, ncd_rejected = match.groups()
+        table = Table(title="Eval Cycle Metrics")
+        table.add_column("Metric", style="bold")
+        table.add_column("Value", justify="right")
+        table.add_row("Duration", f"{duration}min")
+        table.add_row("Eligible miners", eligible)
+        table.add_row("Evaluated", evaluated)
+        table.add_row("Cached", cached)
+        table.add_row("Pre-eval rejected", pre_rejected)
+        table.add_row("NCD rejected", ncd_rejected)
+        console.print(table)
+
+    # Extract winner info
+    winner_match = re.search(r"Miner (\d+) \((\w+)\).*?weight=([\d.]+).*?cost=\$([\d.]+).*?gate=(\w+).*?<- WINNER", text)
+    if winner_match:
+        uid, hotkey_short, weight, cost, gate = winner_match.groups()
+        table = Table(title="Winner")
+        table.add_column("Field", style="bold")
+        table.add_column("Value")
+        table.add_row("Miner UID", uid)
+        table.add_row("Hotkey", hotkey_short)
+        table.add_row("Weight", weight)
+        table.add_row("Cost", f"${cost}")
+        table.add_row("Gate", f"[green]{gate}[/]" if gate == "PASS" else f"[red]{gate}[/]")
+        console.print(table)
+
+    # Extract top qualified miners
+    qualified_pattern = r"Miner (\d+) \((\w+)\):.*?cost=\$([\d.]+).*?gate=PASS"
+    qualified = re.findall(qualified_pattern, text)
+    if qualified and len(qualified) > 1:  # More than just the winner
+        table = Table(title="Top Qualified Miners")
+        table.add_column("UID", justify="right")
+        table.add_column("Hotkey", style="cyan")
+        table.add_column("Cost", justify="right")
+        for uid, hotkey_short, cost in qualified[:10]:  # Top 10
+            table.add_row(uid, hotkey_short, f"${cost}")
+        console.print(table)
+
+
 def display_logs(data: dict) -> None:
     logs = data.get("logs", [])
     table = Table(title=f"Eval Logs ({len(logs)})")

@@ -51,12 +51,43 @@ class TrajRLClient:
         """GET /api/validators"""
         return self._get("/api/validators")
 
-    def scores_by_validator(self, validator: str) -> dict[str, Any]:
-        """GET /api/scores/by-validator?validator=<hotkey>"""
+    def scores_by_validator(self, validator: str | None = None, uid: int | None = None) -> dict[str, Any]:
+        """GET /api/scores/by-validator?validator=<hotkey> or resolve UID to hotkey."""
+        if uid is not None:
+            # Resolve UID to hotkey via validators endpoint
+            validators_data = self.validators()
+            for vali in validators_data.get("validators", []):
+                if vali.get("uid") == uid:
+                    validator = vali.get("hotkey")
+                    if validator:
+                        return self._get("/api/scores/by-validator", params={"validator": validator})
+            raise ValueError(f"Could not find validator with UID {uid}")
+        if validator is None:
+            raise ValueError("Either validator hotkey or uid must be provided")
         return self._get("/api/scores/by-validator", params={"validator": validator})
 
-    def miner(self, hotkey: str) -> dict[str, Any]:
-        """GET /api/miners/:hotkey"""
+    def miner(self, hotkey: str | None = None, uid: int | None = None) -> dict[str, Any]:
+        """GET /api/miners/:hotkey or resolve UID to hotkey first."""
+        if uid is not None:
+            # Resolve UID to hotkey via validators endpoint
+            validators_data = self.validators()
+            # Search through validator scores to find miner by UID
+            # This is a fallback - ideally the API would support UID lookup
+            for vali in validators_data.get("validators", []):
+                vali_key = vali.get("hotkey")
+                if vali_key:
+                    try:
+                        scores = self.scores_by_validator(vali_key)
+                        for entry in scores.get("entries", []):
+                            if entry.get("uid") == uid:
+                                hotkey = entry.get("minerHotkey")
+                                if hotkey:
+                                    return self._get(f"/api/miners/{hotkey}")
+                    except Exception:
+                        continue
+            raise ValueError(f"Could not resolve UID {uid} to a miner hotkey")
+        if hotkey is None:
+            raise ValueError("Either hotkey or uid must be provided")
         return self._get(f"/api/miners/{hotkey}")
 
     def pack(self, hotkey: str, pack_hash: str) -> dict[str, Any]:
@@ -80,7 +111,12 @@ class TrajRLClient:
         limit: int | None = None,
         offset: int | None = None,
     ) -> dict[str, Any]:
-        """GET /api/eval-logs"""
+        """GET /api/eval-logs
+
+        Args:
+            from_date: ISO 8601 date/datetime string (e.g. "2026-03-25" or "2026-03-25T00:00:00Z")
+            to_date: ISO 8601 date/datetime string (e.g. "2026-03-26" or "2026-03-26T23:59:59Z")
+        """
         params = _compact({
             "validator": validator,
             "miner": miner,

@@ -11,12 +11,31 @@ import typer
 from trajrl.api import TrajRLClient
 from trajrl import display as fmt
 
+__version__ = "0.2.0"
+
 app = typer.Typer(
     name="trajrl",
     help="CLI for the TrajectoryRL subnet — query live validator, miner, and evaluation data.",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
+
+
+@app.callback()
+def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-v",
+            help="Show version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """CLI for the TrajectoryRL subnet."""
+    pass
 
 # -- shared option defaults ------------------------------------------------
 
@@ -34,6 +53,12 @@ def _want_json(flag: bool) -> bool:
 
 def _print_json(data: dict) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        print(f"trajrl version {__version__}")
+        raise typer.Exit()
 
 
 # -- commands --------------------------------------------------------------
@@ -68,12 +93,13 @@ def validators(
 
 @app.command()
 def scores(
-    validator: Annotated[str, typer.Argument(help="Validator SS58 hotkey.")],
+    validator: Annotated[str | None, typer.Argument(help="Validator SS58 hotkey.")] = None,
+    uid: Annotated[int | None, typer.Option("--uid", "-u", help="Validator UID (alternative to hotkey)")] = None,
     json_output: Annotated[bool, _json_opt] = False,
     base_url: Annotated[str, _base_url_opt] = "https://trajrl.com",
 ) -> None:
     """Per-miner evaluation scores from a specific validator."""
-    data = _client(base_url).scores_by_validator(validator)
+    data = _client(base_url).scores_by_validator(validator=validator, uid=uid)
     if _want_json(json_output):
         _print_json(data)
     else:
@@ -82,12 +108,13 @@ def scores(
 
 @app.command()
 def miner(
-    hotkey: Annotated[str, typer.Argument(help="Miner SS58 hotkey.")],
+    hotkey: Annotated[str | None, typer.Argument(help="Miner SS58 hotkey.")] = None,
+    uid: Annotated[int | None, typer.Option("--uid", "-u", help="Miner UID (alternative to hotkey)")] = None,
     json_output: Annotated[bool, _json_opt] = False,
     base_url: Annotated[str, _base_url_opt] = "https://trajrl.com",
 ) -> None:
     """Detailed evaluation data for a specific miner."""
-    data = _client(base_url).miner(hotkey)
+    data = _client(base_url).miner(hotkey=hotkey, uid=uid)
     if _want_json(json_output):
         _print_json(data)
     else:
@@ -129,12 +156,15 @@ def submissions(
 def eval_history(
     validator: Annotated[str, typer.Argument(help="Validator SS58 hotkey.")],
     limit: Annotated[int, typer.Option("--limit", "-l", help="Max log entries to scan.")] = 100,
+    from_date: Annotated[str | None, typer.Option("--from", help="Start date (ISO 8601, e.g. 2026-03-25)")] = None,
+    to_date: Annotated[str | None, typer.Option("--to", help="End date (ISO 8601, e.g. 2026-03-26)")] = None,
     json_output: Annotated[bool, _json_opt] = False,
     base_url: Annotated[str, _base_url_opt] = "https://trajrl.com",
 ) -> None:
     """List eval cycle IDs for a validator."""
     data = _client(base_url).eval_logs(
         validator=validator, log_type="cycle", limit=limit,
+        from_date=from_date, to_date=to_date,
     )
     if _want_json(json_output):
         _print_json(data)
@@ -146,6 +176,7 @@ def eval_history(
 def cycle_log(
     validator: Annotated[str, typer.Argument(help="Validator SS58 hotkey.")],
     eval_id: Annotated[Optional[str], typer.Option("--eval-id", help="Specific eval cycle ID.")] = None,
+    format_type: Annotated[str, typer.Option("--format", "-f", help="Output format: 'text' or 'summary'")] = "text",
     json_output: Annotated[bool, _json_opt] = False,
     base_url: Annotated[str, _base_url_opt] = "https://trajrl.com",
 ) -> None:
@@ -161,7 +192,10 @@ def cycle_log(
     if _want_json(json_output):
         _print_json(data)
     else:
-        fmt.display_cycle_log(data)
+        if format_type == "summary":
+            fmt.display_cycle_log_summary(data)
+        else:
+            fmt.display_cycle_log(data)
 
 
 @app.command()

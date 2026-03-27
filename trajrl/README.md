@@ -13,15 +13,20 @@ pip install trajrl
 ## Commands
 
 ```
-trajrl status                       # Network health overview
-trajrl validators                   # List all validators
-trajrl scores <validator_hotkey>    # Per-miner scores from a validator
-trajrl miner <hotkey>               # Miner detail + diagnostics
-trajrl pack <hotkey> <pack_hash>    # Pack evaluation detail
-trajrl submissions [--failed]       # Recent pack submissions
-trajrl eval-history <validator>     # List eval cycle IDs for a validator
-trajrl cycle-log <validator>        # Download and display a cycle log
-trajrl logs [--type cycle|miner]    # Eval log archives
+trajrl status                          # Network health overview
+trajrl validators                      # List all validators
+trajrl scores <validator_hotkey>       # Per-miner scores from a validator
+trajrl scores --uid <uid>              # Query by validator UID instead
+trajrl miner <hotkey>                  # Miner detail + diagnostics
+trajrl miner --uid <uid>               # Query by miner UID instead
+trajrl pack <hotkey> <pack_hash>       # Pack evaluation detail
+trajrl submissions [--failed]          # Recent pack submissions
+trajrl eval-history <validator>        # List eval cycle IDs for a validator
+trajrl eval-history <v> --from <date>  # Filter by date range
+trajrl cycle-log <validator>           # Download and display a cycle log
+trajrl cycle-log <v> --format summary  # Show parsed summary tables
+trajrl logs [--type cycle|miner]       # Eval log archives
+trajrl --version                       # Show CLI version
 ```
 
 ### Global Options
@@ -32,6 +37,31 @@ Every command accepts:
 |--------|-------------|
 | `--json` / `-j` | Force JSON output (auto-enabled when stdout is piped) |
 | `--base-url URL` | Override API base (default: `https://trajrl.com`, env: `TRAJRL_BASE_URL`) |
+| `--version` / `-v` | Show CLI version and exit |
+
+### New in v0.2.0
+
+- **UID support**: Query validators and miners by UID instead of hotkey
+  ```bash
+  trajrl miner --uid 65      # Instead of full hotkey
+  trajrl scores --uid 221    # Query validator by UID
+  ```
+
+- **Date filtering**: Filter eval history by date range
+  ```bash
+  trajrl eval-history 5Cd6h... --from 2026-03-25 --to 2026-03-26
+  ```
+
+- **Cycle log summary**: Parse cycle logs into structured tables
+  ```bash
+  trajrl cycle-log 5Cd6h... --format summary
+  ```
+  Shows: eval metrics, winner info, top qualified miners in tables instead of raw text
+
+- **Version command**: Check your CLI version
+  ```bash
+  trajrl --version
+  ```
 
 ## Usage Examples
 
@@ -63,8 +93,14 @@ trajrl validators
 
 ### Inspect a miner
 
+By hotkey:
 ```bash
 trajrl miner 5HMgR6LnNqUAtaKRwa6bLF4Vy4KBf7TaxCLehyff9mWPhSHt
+```
+
+Or by UID (v0.2.0+):
+```bash
+trajrl miner --uid 65
 ```
 
 Shows rank, qualification status, cost, scenario breakdown, per-validator reports, recent submissions, and ban records.
