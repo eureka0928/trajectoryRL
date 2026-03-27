@@ -2172,9 +2172,9 @@ class TrajectoryValidator:
             champion_hotkey=self.champion_hotkey,
         )
 
-        # Update champion_hotkey to this cycle's winner
+        # Update champion_hotkey to this cycle's winner (only if there IS a winner)
         winner_uid = max(weights_dict, key=weights_dict.get)
-        if winner_uid in uid_to_hotkey:
+        if weights_dict.get(winner_uid, 0) > 0 and winner_uid in uid_to_hotkey:
             self.champion_hotkey = uid_to_hotkey[winner_uid]
 
         # Apply burn: scale miner weights by (1 - BURN_FRACTION),
