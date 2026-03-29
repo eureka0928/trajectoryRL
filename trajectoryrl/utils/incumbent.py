@@ -107,7 +107,7 @@ def select_winner_with_incumbent(
     if updated.incumbent_hotkey is None:
         updated.incumbent_hotkey = lowest_cost_hk
         logger.info(
-            "No incumbent — %s wins with consensus cost $%.4f",
+            "No incumbent — %s elected as incumbent (consensus cost $%.4f)",
             lowest_cost_hk[:8], lowest_cost,
         )
         return lowest_cost_hk, updated
@@ -118,7 +118,7 @@ def select_winner_with_incumbent(
         # Incumbent disqualified — lowest cost takes over
         updated.incumbent_hotkey = lowest_cost_hk
         logger.info(
-            "Incumbent %s disqualified — %s takes over (cost $%.4f)",
+            "Incumbent %s disqualified — %s elected as new incumbent (cost $%.4f)",
             incumbent_hk[:8], lowest_cost_hk[:8], lowest_cost,
         )
         return lowest_cost_hk, updated
@@ -126,7 +126,7 @@ def select_winner_with_incumbent(
     # Incumbent is the cheapest — retains
     if lowest_cost_hk == incumbent_hk:
         logger.info(
-            "Incumbent %s retains — lowest consensus cost $%.4f",
+            "Incumbent %s retains title — still lowest consensus cost $%.4f",
             incumbent_hk[:8], qualified_miners[incumbent_hk],
         )
         return incumbent_hk, updated
@@ -139,8 +139,8 @@ def select_winner_with_incumbent(
 
     if lowest_cost < threshold:
         logger.info(
-            "Incumbent overtake: %s ($%.4f) beats %s historical best "
-            "$%.4f × %.0f%% = $%.4f",
+            "Incumbent overtake: %s ($%.4f) clears δ margin against %s "
+            "(historical best $%.4f × %.0f%% = $%.4f) — new incumbent elected",
             lowest_cost_hk[:8], lowest_cost,
             incumbent_hk[:8], incumbent_best,
             (1 - cost_delta) * 100, threshold,
@@ -150,7 +150,7 @@ def select_winner_with_incumbent(
     else:
         logger.info(
             "Incumbent %s retains: challenger %s ($%.4f) does not "
-            "clear margin (required < $%.4f)",
+            "clear δ margin (required < $%.4f)",
             incumbent_hk[:8], lowest_cost_hk[:8], lowest_cost, threshold,
         )
         return incumbent_hk, updated

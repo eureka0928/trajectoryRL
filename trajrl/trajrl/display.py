@@ -432,7 +432,7 @@ def display_cycle_log_summary(data: dict) -> None:
         console.print(table)
 
     # Extract winner info
-    winner_match = re.search(r"Miner (\d+) \((\w+)\).*?weight=([\d.]+).*?cost=\$([\d.]+).*?gate=(\w+).*?<- WINNER", text)
+    winner_match = re.search(r"Miner (\d+) \((\w+)\).*?weight=([\d.]+).*?cost=\$([\d.]+).*?gate=(\w+).*?<- ON-CHAIN WINNER", text)
     if winner_match:
         uid, hotkey_short, weight, cost, gate = winner_match.groups()
         table = Table(title="Winner")

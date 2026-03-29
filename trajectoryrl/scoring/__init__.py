@@ -400,36 +400,32 @@ class TrajectoryScorer:
         best_challenger_uid = min(qualified_costs, key=_sort_key)
         best_challenger_cost = qualified_costs[best_challenger_uid]
 
-        # Decide winner
+        # Decide on-chain weight winner
         if best_challenger_uid == champion_uid:
-            # Champion is already the cheapest — retains crown
             winner_uid = champion_uid
         elif best_challenger_cost < champion_cost * (1 - cost_delta):
-            # Challenger beats δ threshold — dethrones champion
             logger.info(
-                f"Cost overtake: Miner {best_challenger_uid} "
-                f"(${best_challenger_cost:.4f}) beats champion "
+                f"[weight-computation] δ overtake: Miner {best_challenger_uid} "
+                f"(${best_challenger_cost:.4f}) dethrones incumbent "
                 f"Miner {champion_uid} (${champion_cost:.4f}, "
                 f"required<${champion_cost * (1 - cost_delta):.4f})"
             )
             winner_uid = best_challenger_uid
         else:
-            # Challenger is cheaper but doesn't clear δ — champion retains
             logger.info(
-                f"Champion Miner {champion_uid} (${champion_cost:.4f}) "
-                f"retains: best challenger Miner {best_challenger_uid} "
-                f"(${best_challenger_cost:.4f}) does not clear δ "
-                f"(required<${champion_cost * (1 - cost_delta):.4f})"
+                f"[weight-computation] Incumbent Miner {champion_uid} "
+                f"(${champion_cost:.4f}) retains: best challenger "
+                f"Miner {best_challenger_uid} (${best_challenger_cost:.4f}) "
+                f"does not clear δ (required<${champion_cost * (1 - cost_delta):.4f})"
             )
             winner_uid = champion_uid
 
-        # Winner takes all; disqualified miners get 0
         weights = {uid: 0.0 for uid in costs}
         weights[winner_uid] = 1.0
 
         logger.info(
-            f"Cost winner-take-all: Miner {winner_uid} wins with "
-            f"cost=${qualified_costs[winner_uid]:.4f} (delta={cost_delta})"
+            f"[weight-computation] On-chain weight winner: Miner {winner_uid} "
+            f"(cost=${qualified_costs[winner_uid]:.4f}, delta={cost_delta})"
         )
 
         return weights

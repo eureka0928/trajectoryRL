@@ -792,14 +792,16 @@ class TrajectoryValidator:
         if winner_hk:
             self.champion_hotkey = winner_hk
             logger.info(
-                "Window %d: consensus winner = %s (incumbent=%s)",
+                "Window %d: incumbent elected = %s (%s) — "
+                "local state only, weights will be applied at next tempo",
                 window.window_number, winner_hk[:8],
-                "yes" if winner_hk == updated_state.incumbent_hotkey else "new",
+                "retained" if winner_hk == updated_state.incumbent_hotkey else "new challenger",
             )
 
         logger.info(
             "Window %d: consensus aggregation complete — %d miners, "
-            "%d validators contributed (%s)",
+            "%d validators contributed (%s). "
+            "Note: no on-chain weight change until next _compute_and_set_weights",
             window.window_number, len(consensus_costs),
             stats.passed, stats.summary(),
         )
@@ -2413,9 +2415,8 @@ class TrajectoryValidator:
             weights_dict.get(OWNER_UID, 0.0) + BURN_FRACTION
         )
 
-        # Log results
         logger.info("=" * 60)
-        logger.info("WEIGHT RESULTS (source: CONSENSUS)")
+        logger.info("ON-CHAIN WEIGHT SUBMISSION (source: consensus costs)")
         logger.info(f"Burn fraction: {BURN_FRACTION:.0%} to owner UID {OWNER_UID}")
         logger.info("=" * 60)
         for uid, weight in sorted(
@@ -2430,7 +2431,7 @@ class TrajectoryValidator:
             marker = ""
             hk = uid_to_hotkey.get(uid, "?")
             if weight > 0:
-                marker = " <- WINNER" if weight == 0.5 else f" <- TOP-{sum(1 for u, w in weights_dict.items() if w >= weight and u != OWNER_UID)}"
+                marker = " <- ON-CHAIN WINNER" if weight == 0.5 else f" <- TOP-{sum(1 for u, w in weights_dict.items() if w >= weight and u != OWNER_UID)}"
             gate = "PASS" if qualified.get(uid, False) else "FAIL"
             cost_str = f"${costs[uid]:.4f}" if uid in costs else "n/a"
             logger.info(
@@ -2454,7 +2455,7 @@ class TrajectoryValidator:
                     wait_for_inclusion=True,
                     wait_for_finalization=False,
                 )
-                logger.info("Weights set successfully")
+                logger.info("On-chain set_weights committed successfully")
                 self._last_set_weights_at = int(time.time())
                 self._last_weights_uids = uids
                 self._last_weights = weights
@@ -2481,7 +2482,7 @@ class TrajectoryValidator:
                 wait_for_inclusion=True,
                 wait_for_finalization=False,
             )
-            logger.info("Replayed last weights successfully")
+            logger.info("On-chain set_weights replayed (cached from last computation)")
             self._last_set_weights_at = int(time.time())
         except Exception as e:
             logger.error(f"Error replaying weights: {e}", exc_info=True)

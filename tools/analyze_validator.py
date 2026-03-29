@@ -138,7 +138,7 @@ _RE_OWNER_WEIGHT = re.compile(
     r"Owner\s+UID\s+(\d+):\s+weight=([\d.]+)\s+\(burn\)"
 )
 _RE_BURN = re.compile(r"Burn fraction:\s+([\d.]+%)")
-_RE_SET_OK = re.compile(r"Weights set successfully")
+_RE_SET_OK = re.compile(r"(Weights set successfully|On-chain set_weights committed successfully)")
 _RE_FALLBACK = re.compile(r"(Fallback weights set|setting fallback weight)", re.I)
 
 
@@ -155,7 +155,7 @@ def _parse_weight_results(log_text: str) -> dict:
 
     in_section = False
     for line in log_text.splitlines():
-        if "WEIGHT RESULTS" in line:
+        if "WEIGHT RESULTS" in line or "ON-CHAIN WEIGHT SUBMISSION" in line:
             in_section = True
             miners.clear()
             owner = None
@@ -229,7 +229,7 @@ def _print_weight_distribution(client: TrajRLClient, validator_hotkey: str) -> N
                 border_style="yellow",
             ))
         else:
-            console.print("[yellow]No WEIGHT RESULTS found in cycle log.[/]")
+            console.print("[yellow]No ON-CHAIN WEIGHT SUBMISSION found in cycle log.[/]")
         return
 
     all_weights = [m["weight"] for m in miners]
@@ -255,7 +255,7 @@ def _print_weight_distribution(client: TrajRLClient, validator_hotkey: str) -> N
         f"[bold green]{len(nonzero_miner)}[/] with weight > 0"
     )
 
-    winner = next((m for m in miners if "WINNER" in m.get("marker", "")), None)
+    winner = next((m for m in miners if "ON-CHAIN WINNER" in m.get("marker", "")), None)
     if winner:
         summary_lines.append(
             f"  [bold yellow]Winner:[/] UID {winner['uid']} "
@@ -307,7 +307,7 @@ def _print_weight_distribution(client: TrajRLClient, validator_hotkey: str) -> N
         gate_style = "green" if m["gate"] == "PASS" else "red"
         cost_str = f"${m['cost']:.4f}" if m["cost"] is not None else "n/a"
         marker = m.get("marker", "")
-        note_style = "bold yellow" if "WINNER" in marker else "dim"
+        note_style = "bold yellow" if "ON-CHAIN WINNER" in marker else "dim"
 
         table.add_row(
             str(i),
