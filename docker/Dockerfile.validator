@@ -62,6 +62,7 @@ COPY trajectoryrl/ trajectoryrl/
 COPY neurons/ neurons/
 COPY scripts/ scripts/
 COPY clawbench/ clawbench/
+RUN rm -f clawbench/.git
 
 RUN pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -r clawbench/requirements.txt && \
