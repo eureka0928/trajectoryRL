@@ -1222,7 +1222,7 @@ class TrajectoryValidator:
         capturing submission and consensus logs as well.
         """
         cycle_start = time.time()
-        cycle_eval_id = f"w{window_number}"
+        cycle_eval_id = time.strftime("%Y%m%d_%H%M") + f"_w{window_number}"
 
         self._cycle_eval_id = cycle_eval_id
         self._cycle_log_offset = self._get_validator_log_offset()
@@ -2244,7 +2244,7 @@ class TrajectoryValidator:
         per-miner log so only new content is captured.
 
         Args:
-            eval_id: Cycle-level eval identifier (e.g. "w42").
+            eval_id: Cycle-level eval identifier (e.g. "20260329_1430_w42").
             hotkey: Miner hotkey.
 
         Returns:

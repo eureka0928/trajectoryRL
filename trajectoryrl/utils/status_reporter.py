@@ -201,7 +201,7 @@ async def upload_eval_logs(
 
     Args:
         wallet: bt.Wallet with accessible hotkey for signing.
-        eval_id: Eval run identifier (YYYYMMDD_HHMMSS format).
+        eval_id: Eval run identifier (e.g. "20260329_1430_w42").
         miner_hotkey: Hotkey of the evaluated miner.
         miner_uid: UID of the evaluated miner.
         block_height: Block height of this eval.
@@ -278,7 +278,7 @@ async def upload_cycle_logs(
 
     Args:
         wallet: bt.Wallet with accessible hotkey for signing.
-        eval_id: Eval cycle identifier (YYYYMMDD_HHMMSS format).
+        eval_id: Eval cycle identifier (e.g. "20260329_1430_w42").
         block_height: Block height at cycle start.
         log_archive: Gzipped tar archive bytes containing the cycle log.
         upload_url: Dashboard cycle log upload endpoint.
