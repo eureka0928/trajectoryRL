@@ -139,6 +139,14 @@ class IPFSBackend(CASBackend):
         if len(data) > MAX_PAYLOAD_BYTES:
             logger.warning("%s download exceeded max size: %d bytes (CID=%s)", source, len(data), cid)
             return None
+        try:
+            json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.warning(
+                "%s: corrupt payload (%d bytes: %s), skipping",
+                source, len(data), e,
+            )
+            return None
         logger.debug("%s download OK: CID=%s, %d bytes", source, cid, len(data))
         return data
 
@@ -214,6 +222,14 @@ class TrajRLAPIBackend(CASBackend):
                     data = await resp.content.read(MAX_PAYLOAD_BYTES + 1)
                     if len(data) > MAX_PAYLOAD_BYTES:
                         logger.warning("URL download exceeded max size: %d bytes (url=%s)", len(data), address[:60])
+                        return None
+                    try:
+                        json.loads(data)
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        logger.warning(
+                            "URL: corrupt payload (%d bytes: %s, url=%s), skipping",
+                            len(data), e, address[:60],
+                        )
                         return None
                     logger.debug("URL download OK: url=%s, %d bytes", address[:60], len(data))
                     return data
