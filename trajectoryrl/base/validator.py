@@ -82,6 +82,10 @@ _EVAL_CACHE_MAX_RETRIES = int(os.getenv("TRAJECTORYRL_CACHE_MAX_RETRIES", "3"))
 _EVAL_CACHE_TTL_DAYS = int(os.getenv("TRAJECTORYRL_CACHE_TTL_DAYS", "14"))
 _EVAL_CACHE_ENABLED = os.getenv("TRAJECTORYRL_EVAL_CACHE_ENABLED", "1") != "0"
 
+_METAGRAPH_SYNC_RETRIES = 3
+_METAGRAPH_SYNC_DELAY = 10  # seconds between retries
+_METAGRAPH_MIN_NEURONS = 1  # minimum expected neurons for a healthy metagraph
+
 
 class TrajectoryValidator:
     """TrajectoryRL validator that evaluates policy packs using ClawBench.
@@ -120,9 +124,18 @@ class TrajectoryValidator:
         self.subtensor = bt.Subtensor(network=config.network)
         self.metagraph = self.subtensor.metagraph(config.netuid)
 
+        mg_n = getattr(self.metagraph, "n", 0)
         logger.info(f"Wallet hotkey: {self.wallet.hotkey.ss58_address[:16]}...")
         logger.info(f"Network: {config.network}")
         logger.info(f"Netuid: {config.netuid}")
+        logger.info(f"Metagraph: n={mg_n}, block={getattr(self.metagraph, 'block', '?')}")
+        if not mg_n:
+            logger.error(
+                "METAGRAPH EMPTY at startup (n=0). "
+                "This validator will not be able to set weights until "
+                "metagraph sync is healthy. Check subtensor endpoint: %s",
+                config.network,
+            )
 
         logger.debug("Initializing ClawBench harness...")
         self.harness = ClawBenchHarness(
@@ -290,6 +303,86 @@ class TrajectoryValidator:
         self._load_eval_cache()
 
         logger.info("Validator initialization complete!")
+
+    # ------------------------------------------------------------------
+    # Metagraph sync helpers
+    # ------------------------------------------------------------------
+
+    def _sync_metagraph(
+        self,
+        *,
+        retries: int = _METAGRAPH_SYNC_RETRIES,
+        caller: str = "",
+    ) -> bool:
+        """Sync metagraph with retries.  Returns True if healthy (n > 0).
+
+        On each failed attempt the subtensor connection is rebuilt so that
+        transient network / websocket issues are recovered from automatically.
+        """
+        label = f"[{caller}] " if caller else ""
+
+        for attempt in range(1, retries + 1):
+            try:
+                self.metagraph.sync(subtensor=self.subtensor)
+            except Exception as e:
+                logger.warning(
+                    "%sMetagraph sync attempt %d/%d failed: %s",
+                    label, attempt, retries, e,
+                )
+                if attempt < retries:
+                    time.sleep(_METAGRAPH_SYNC_DELAY)
+                    self._reconnect_subtensor(label)
+                continue
+
+            n = getattr(self.metagraph, "n", 0)
+            if n and n >= _METAGRAPH_MIN_NEURONS:
+                if attempt > 1:
+                    logger.info(
+                        "%sMetagraph sync recovered on attempt %d/%d "
+                        "(n=%d, block=%s)",
+                        label, attempt, retries, n,
+                        getattr(self.metagraph, "block", "?"),
+                    )
+                return True
+
+            logger.warning(
+                "%sMetagraph sync returned n=%d (expected >= %d), "
+                "attempt %d/%d",
+                label, n, _METAGRAPH_MIN_NEURONS, attempt, retries,
+            )
+            if attempt < retries:
+                time.sleep(_METAGRAPH_SYNC_DELAY)
+                self._reconnect_subtensor(label)
+
+        n = getattr(self.metagraph, "n", 0)
+        logger.error(
+            "%sMETAGRAPH UNHEALTHY after %d attempts — n=%d, "
+            "block=%s. On-chain operations (set_weights, commitments) "
+            "will likely fail silently. Check subtensor endpoint: %s",
+            label, retries, n,
+            getattr(self.metagraph, "block", "?"),
+            self.config.network,
+        )
+        return False
+
+    def _reconnect_subtensor(self, label: str = "") -> None:
+        """Rebuild the subtensor connection to recover from stale websockets."""
+        try:
+            logger.info("%sReconnecting subtensor (network=%s)...",
+                        label, self.config.network)
+            self.subtensor = bt.Subtensor(network=self.config.network)
+            self.metagraph = self.subtensor.metagraph(self.config.netuid)
+            logger.info("%sSubtensor reconnected", label)
+        except Exception as e:
+            logger.error(
+                "%sFailed to reconnect subtensor: %s", label, e,
+                exc_info=True,
+            )
+
+    def _is_metagraph_healthy(self) -> bool:
+        """Quick check whether the cached metagraph has any neurons."""
+        n = getattr(self.metagraph, "n", 0)
+        return bool(n and n >= _METAGRAPH_MIN_NEURONS)
 
     # ------------------------------------------------------------------
     # EMA persistence
@@ -721,6 +814,14 @@ class TrajectoryValidator:
 
     async def _run_consensus_aggregation(self, window: EvaluationWindow):
         """Read on-chain consensus pointers, download payloads, filter, aggregate."""
+        if not self._is_metagraph_healthy():
+            logger.warning(
+                "Window %d: metagraph unhealthy (n=%d) before consensus "
+                "aggregation — re-syncing...",
+                window.window_number, getattr(self.metagraph, "n", 0),
+            )
+            self._sync_metagraph(caller="consensus_aggregation")
+
         chain_commitments = fetch_validator_consensus_commitments(
             self.subtensor, self.config.netuid, self.metagraph,
         )
@@ -1148,13 +1249,23 @@ class TrajectoryValidator:
         self._hotkey_packs.clear()
         self._pack_by_hash.clear()
 
-        # 2. Sync metagraph
+        # 2. Sync metagraph (with retries + reconnect)
         logger.debug("Syncing metagraph...")
-        self.metagraph.sync(subtensor=self.subtensor)
+        mg_healthy = self._sync_metagraph(caller="eval_cycle")
         logger.info(
-            f"Metagraph synced: {self.metagraph.n} neurons, "
-            f"block {self.metagraph.block}"
+            "Metagraph synced: n=%d neurons, block=%s, healthy=%s",
+            getattr(self.metagraph, "n", 0),
+            getattr(self.metagraph, "block", "?"),
+            mg_healthy,
         )
+        if not mg_healthy:
+            logger.error(
+                "Metagraph has 0 neurons — cannot evaluate or set weights. "
+                "Skipping eval cycle. This usually means the subtensor "
+                "endpoint is unreachable or returning stale data."
+            )
+            self._eval_fallback_active = True
+            return
 
         # 3. Read on-chain commitments
         logger.debug("Reading on-chain commitments...")
@@ -2351,10 +2462,18 @@ class TrajectoryValidator:
         and calls set_weights. The resulting uids/weights are cached in
         self._last_weights_uids / self._last_weights for mid-eval replays.
         """
-        try:
-            self.metagraph.sync(subtensor=self.subtensor)
-        except Exception as e:
-            logger.warning(f"Metagraph sync failed, using cached: {e}")
+        mg_healthy = self._sync_metagraph(caller="set_weights")
+        if not mg_healthy:
+            logger.error(
+                "Metagraph unhealthy (n=%d) — cannot compute weights. "
+                "Falling back to owner UID, but set_weights may also "
+                "fail silently. Investigate subtensor connectivity.",
+                getattr(self.metagraph, "n", 0),
+            )
+            await self._set_fallback_weights(
+                reason="Metagraph unhealthy (n=0)"
+            )
+            return
 
         # Read commitments to know which miners are currently valid
         commitments = fetch_all_commitments(
@@ -2469,8 +2588,12 @@ class TrajectoryValidator:
         else:
             uids = list(weights_dict.keys())
             weights = [weights_dict[uid] for uid in uids]
+            logger.info(
+                "Calling set_weights: uids=%s, weights=%s",
+                uids, [f"{w:.4f}" for w in weights],
+            )
             try:
-                self.subtensor.set_weights(
+                result = self.subtensor.set_weights(
                     netuid=self.config.netuid,
                     wallet=self.wallet,
                     uids=uids,
@@ -2478,12 +2601,26 @@ class TrajectoryValidator:
                     wait_for_inclusion=True,
                     wait_for_finalization=False,
                 )
-                logger.info("On-chain set_weights committed successfully")
-                self._last_set_weights_at = int(time.time())
-                self._last_weights_uids = uids
-                self._last_weights = weights
+                success = getattr(result, "success", None)
+                message = getattr(result, "message", str(result))
+                if success is False:
+                    logger.error(
+                        "set_weights FAILED on-chain — "
+                        "success=%s, message=%s, uids=%s. "
+                        "On-chain weights NOT updated.",
+                        success, message, uids,
+                    )
+                else:
+                    logger.info(
+                        "On-chain set_weights committed — "
+                        "success=%s, message=%s, uids=%s",
+                        success, message, uids,
+                    )
+                    self._last_set_weights_at = int(time.time())
+                    self._last_weights_uids = uids
+                    self._last_weights = weights
             except Exception as e:
-                logger.error(f"Error setting weights: {e}", exc_info=True)
+                logger.error("Error setting weights: %s", e, exc_info=True)
 
     async def _replay_last_weights(self):
         """Re-set the last computed weights on-chain without recomputing.
@@ -2497,7 +2634,7 @@ class TrajectoryValidator:
             await self._set_fallback_weights(reason="No cached weights for replay")
             return
         try:
-            self.subtensor.set_weights(
+            result = self.subtensor.set_weights(
                 netuid=self.config.netuid,
                 wallet=self.wallet,
                 uids=self._last_weights_uids,
@@ -2505,27 +2642,51 @@ class TrajectoryValidator:
                 wait_for_inclusion=True,
                 wait_for_finalization=False,
             )
-            logger.info("On-chain set_weights replayed (cached from last computation)")
-            self._last_set_weights_at = int(time.time())
+            success = getattr(result, "success", None)
+            message = getattr(result, "message", str(result))
+            if success is False:
+                logger.error(
+                    "Replay set_weights FAILED — success=%s, message=%s, "
+                    "uids=%s", success, message, self._last_weights_uids,
+                )
+            else:
+                logger.info(
+                    "On-chain set_weights replayed (cached) — "
+                    "success=%s, message=%s, uids=%s",
+                    success, message, self._last_weights_uids,
+                )
+                self._last_set_weights_at = int(time.time())
         except Exception as e:
-            logger.error(f"Error replaying weights: {e}", exc_info=True)
+            logger.error("Error replaying weights: %s", e, exc_info=True)
 
     def _fallback_owner_weights(self) -> Optional[Tuple[list, list]]:
         """Read on-chain weights set by OWNER_UID and return (uids, weights).
 
         Returns None if the owner has no weights or the read fails.
         """
+        if not self._is_metagraph_healthy():
+            logger.warning(
+                "Cannot read owner weights: metagraph unhealthy (n=%d). "
+                "Attempting re-sync...",
+                getattr(self.metagraph, "n", 0),
+            )
+            if not self._sync_metagraph(caller="fallback_owner_weights"):
+                logger.error(
+                    "Metagraph still unhealthy after retry — cannot read "
+                    "owner weight row. Falling back to owner-only weight."
+                )
+                return None
+
         try:
-            self.metagraph.sync(subtensor=self.subtensor)
             W = self.metagraph.W  # (n, n) weight matrix
             if OWNER_UID >= W.shape[0]:
                 logger.warning(
-                    f"OWNER_UID {OWNER_UID} out of range (metagraph size {W.shape[0]})"
+                    "OWNER_UID %d out of range (metagraph size %d)",
+                    OWNER_UID, W.shape[0],
                 )
                 return None
 
             owner_weights = W[OWNER_UID]
-            # Extract non-zero entries
             uids = []
             weights = []
             for uid, w in enumerate(owner_weights.tolist()):
@@ -2535,16 +2696,18 @@ class TrajectoryValidator:
 
             if not uids:
                 logger.warning(
-                    f"Owner UID {OWNER_UID} has no non-zero weights on chain"
+                    "Owner UID %d has no non-zero weights on chain",
+                    OWNER_UID,
                 )
                 return None
 
             logger.info(
-                f"Copied {len(uids)} weight entries from owner UID {OWNER_UID}"
+                "Copied %d weight entries from owner UID %d: uids=%s",
+                len(uids), OWNER_UID, uids,
             )
             return uids, weights
         except Exception as e:
-            logger.warning(f"Failed to read owner weights from chain: {e}")
+            logger.warning("Failed to read owner weights from chain: %s", e)
             return None
 
     def _fallback_to_owner(self) -> Tuple[list, list]:
@@ -2567,22 +2730,32 @@ class TrajectoryValidator:
             logger.debug("Skipping fallback weights: wallet hotkey not available")
             return
 
+        if not self._is_metagraph_healthy():
+            logger.error(
+                "METAGRAPH UNHEALTHY (n=%d) during fallback weight setting. "
+                "Attempting reconnect before set_weights. Reason: %s",
+                getattr(self.metagraph, "n", 0), reason,
+            )
+            self._sync_metagraph(caller="fallback_weights")
+
         try:
             copied = self._fallback_owner_weights()
             if copied is not None:
                 uids, weights = copied
                 logger.info(
-                    f"{reason} — copying weights from owner UID {OWNER_UID} "
-                    f"({len(uids)} entries)"
+                    "%s — copying weights from owner UID %d "
+                    "(%d entries, uids=%s)",
+                    reason, OWNER_UID, len(uids), uids,
                 )
             else:
                 uids, weights = self._fallback_to_owner()
                 logger.info(
-                    f"{reason} — setting fallback weight to "
-                    f"owner UID {OWNER_UID}"
+                    "%s — setting fallback weight to "
+                    "owner UID %d (uids=%s, weights=%s)",
+                    reason, OWNER_UID, uids, weights,
                 )
 
-            self.subtensor.set_weights(
+            result = self.subtensor.set_weights(
                 netuid=self.config.netuid,
                 wallet=self.wallet,
                 uids=uids,
@@ -2590,10 +2763,24 @@ class TrajectoryValidator:
                 wait_for_inclusion=True,
                 wait_for_finalization=False,
             )
-            logger.info(f"Fallback weights set (owner UID {OWNER_UID})")
-            self._last_set_weights_at = int(time.time())
+            success = getattr(result, "success", None)
+            message = getattr(result, "message", str(result))
+            if success is False:
+                logger.error(
+                    "FALLBACK set_weights FAILED on-chain — "
+                    "success=%s, message=%s, uids=%s. "
+                    "On-chain weights remain STALE.",
+                    success, message, uids,
+                )
+            else:
+                logger.info(
+                    "Fallback weights set (owner UID %d, uids=%s) — "
+                    "success=%s, message=%s",
+                    OWNER_UID, uids, success, message,
+                )
+                self._last_set_weights_at = int(time.time())
         except Exception as e:
-            logger.error(f"Error setting fallback weights: {e}", exc_info=True)
+            logger.error("Error setting fallback weights: %s", e, exc_info=True)
 
 
 async def main():
