@@ -79,9 +79,8 @@ EVAL_START_BLOCK = 0
 # Shadow mode runs real evals and logs results, but always sets weights to owner UID 74.
 SHADOW_MODE = False
 
-_EVAL_CACHE_MAX_RETRIES = int(os.getenv("TRAJECTORYRL_CACHE_MAX_RETRIES", "3"))
-_EVAL_CACHE_TTL_DAYS = int(os.getenv("TRAJECTORYRL_CACHE_TTL_DAYS", "14"))
 _EVAL_CACHE_ENABLED = os.getenv("TRAJECTORYRL_EVAL_CACHE_ENABLED", "1") != "0"
+_EVAL_CACHE_TTL_DAYS = int(os.getenv("TRAJECTORYRL_CACHE_TTL_DAYS", "7"))
 
 _METAGRAPH_SYNC_RETRIES = 3
 _METAGRAPH_SYNC_DELAY = 10  # seconds between retries
@@ -293,11 +292,10 @@ class TrajectoryValidator:
         # Load persisted EMA state
         self._load_ema_state()
 
-        # Eval result cache: pack_hash -> {status, result, failure_count, ...}
-        # Keyed by miner-submitted pack_hash; avoids re-running ClawBench + LLM
-        # judge for packs that have already been evaluated this cycle.
+        # Eval result cache: pack_hash -> {result, cached_at}
         self._eval_cache: Dict[str, dict] = {}
         self._load_eval_cache()
+        self._validator_healthy: bool = True
 
         logger.info("Validator initialization complete!")
 
@@ -448,6 +446,10 @@ class TrajectoryValidator:
 
     # ------------------------------------------------------------------
     # Eval result cache
+    #
+    # Caches all eval results (success + failure) keyed by pack_hash.
+    # When _validator_healthy is False the cache is bypassed so every
+    # pack is re-evaluated from scratch.
     # ------------------------------------------------------------------
 
     @property
@@ -455,7 +457,7 @@ class TrajectoryValidator:
         return self.config.ema_state_path.parent / "eval_cache.json"
 
     def _load_eval_cache(self):
-        """Load eval result cache from disk, pruning expired entries."""
+        """Load eval result cache from disk, pruning entries older than TTL."""
         if not _EVAL_CACHE_ENABLED:
             return
         path = self._eval_cache_path
@@ -467,7 +469,7 @@ class TrajectoryValidator:
             cutoff = time.time() - _EVAL_CACHE_TTL_DAYS * 86400
             self._eval_cache = {
                 k: v for k, v in data.items()
-                if v.get("last_eval_at", 0) > cutoff
+                if v.get("cached_at", 0) > cutoff
             }
             pruned = len(data) - len(self._eval_cache)
             logger.debug(
@@ -490,79 +492,43 @@ class TrajectoryValidator:
             logger.warning(f"Failed to save eval cache: {e}")
 
     def _check_eval_cache(self, pack_hash: str) -> Tuple[bool, Optional[Dict]]:
-        """Check whether a cached eval result can be reused for pack_hash.
+        """Return a cached result for *pack_hash*, if fresh.
+
+        Bypassed entirely when _validator_healthy is False so that every
+        pack is re-evaluated after a suspected validator-side failure.
 
         Returns:
-            (should_use_cache, cached_result)
-            - (True, result_dict)  success hit — use result directly
-            - (True, None)         failed hit, max retries reached — treat as None
-            - (False, None)        no usable cache — run full evaluation
+            (True, result_or_None) — cache hit (result may be None for
+                                     a cached failure)
+            (False, None)          — cache miss, run full evaluation
         """
-        if not _EVAL_CACHE_ENABLED:
+        if not _EVAL_CACHE_ENABLED or not self._validator_healthy:
             return False, None
 
         entry = self._eval_cache.get(pack_hash)
         if entry is None:
-            logger.debug(f"[EVAL_CACHE] MISS pack_hash={pack_hash[:12]}")
             return False, None
 
-        if entry["status"] == "success":
-            logger.info(f"[EVAL_CACHE] HIT  pack_hash={pack_hash[:12]} status=success")
-            return True, entry["result"]
-
-        # status == "failed"
-        failure_count = entry.get("failure_count", 1)
-        if failure_count >= _EVAL_CACHE_MAX_RETRIES:
-            logger.info(
-                f"[EVAL_CACHE] SKIP pack_hash={pack_hash[:12]} status=failed "
-                f"failure_count={failure_count}/{_EVAL_CACHE_MAX_RETRIES} "
-                f"(max retries reached)"
+        age_days = (time.time() - entry.get("cached_at", 0)) / 86400
+        if age_days > _EVAL_CACHE_TTL_DAYS:
+            del self._eval_cache[pack_hash]
+            logger.debug(
+                f"[EVAL_CACHE] EXPIRED pack_hash={pack_hash[:12]} "
+                f"age={age_days:.1f}d"
             )
-            return True, None
+            return False, None
 
-        logger.info(
-            f"[EVAL_CACHE] HIT  pack_hash={pack_hash[:12]} status=failed "
-            f"failure_count={failure_count}/{_EVAL_CACHE_MAX_RETRIES} (retrying)"
-        )
-        return False, None
+        logger.info(f"[EVAL_CACHE] HIT pack_hash={pack_hash[:12]}")
+        return True, entry["result"]
 
-    def _update_eval_cache(
-        self,
-        pack_hash: str,
-        eval_result: Optional[Dict],
-        failure_reason: Optional[str] = None,
-    ):
-        """Write or update the eval cache entry for pack_hash.
-
-        On success, stores the full result dict and resets failure_count.
-        On failure, increments failure_count (capped behaviour handled by
-        _check_eval_cache on the next call).
-        """
+    def _update_eval_cache(self, pack_hash: str, eval_result: Optional[Dict]):
+        """Cache an eval result (success or failure)."""
         if not _EVAL_CACHE_ENABLED:
             return
-        now = time.time()
-        existing = self._eval_cache.get(pack_hash)
-        first_eval_at = existing["first_eval_at"] if existing else now
-
-        if eval_result is not None:
-            self._eval_cache[pack_hash] = {
-                "status": "success",
-                "result": eval_result,
-                "failure_count": 0,
-                "first_eval_at": first_eval_at,
-                "last_eval_at": now,
-                "failure_reason": None,
-            }
-        else:
-            prev_count = existing.get("failure_count", 0) if existing else 0
-            self._eval_cache[pack_hash] = {
-                "status": "failed",
-                "result": None,
-                "failure_count": prev_count + 1,
-                "first_eval_at": first_eval_at,
-                "last_eval_at": now,
-                "failure_reason": failure_reason,
-            }
+        self._eval_cache[pack_hash] = {
+            "result": eval_result,
+            "cached_at": time.time(),
+        }
 
     # ------------------------------------------------------------------
     # EMA update
@@ -1521,22 +1487,15 @@ class TrajectoryValidator:
                 continue
 
             # Check eval cache before spending LLM tokens.
-            # Pre-eval always runs; cache is keyed by pack_hash.
             eval_elapsed = 0.0
             cache_hit, cache_result = self._check_eval_cache(commitment.pack_hash)
             if cache_hit:
                 cached_count += 1
                 eval_result = cache_result
-                if cache_result is not None:
-                    logger.info(
-                        f"[{miner_idx}/{total_eligible}] Miner {uid} ({hotkey[:8]}): "
-                        f"using cached eval result (pack_hash={commitment.pack_hash[:12]})"
-                    )
-                else:
-                    logger.info(
-                        f"[{miner_idx}/{total_eligible}] Miner {uid} ({hotkey[:8]}): "
-                        f"cached failure — max retries reached, skipping eval"
-                    )
+                logger.info(
+                    f"[{miner_idx}/{total_eligible}] Miner {uid} ({hotkey[:8]}): "
+                    f"using cached eval result (pack_hash={commitment.pack_hash[:12]})"
+                )
             else:
                 attempted_count += 1
                 logger.info(
@@ -1653,21 +1612,24 @@ class TrajectoryValidator:
                         f"Total cost: ${total_cost:.4f} ({scenario_str})"
                     )
 
-        # All attempted evaluations failed — likely an LLM API issue
+        # All attempted evaluations failed — likely a validator-side
+        # issue.  Mark unhealthy so the next cycle ignores cached results.
         if attempted_count > 0 and evaluated_count == 0:
             logger.error(
                 f"All {attempted_count} miner evaluations failed. "
                 "Possible LLM API key issue or service outage. "
                 "Setting fallback weights to owner UID."
             )
+            self._validator_healthy = False
             self._eval_fallback_active = True
             await self._set_fallback_weights(
                 reason="All evaluations failed (LLM error)"
             )
             return
 
-        # Eval completed successfully — clear fallback flag so tempo
-        # refreshes use real computed weights.
+        # Eval completed successfully — mark validator healthy and clear
+        # fallback flag so tempo refreshes use real computed weights.
+        self._validator_healthy = True
         self._eval_fallback_active = False
 
         # 5. Set weights from consensus costs (or fallback if no consensus yet)
