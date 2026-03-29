@@ -76,8 +76,6 @@ logger = logging.getLogger(__name__)
 OWNER_UID = 74
 BURN_FRACTION = 0.50  # 50% of miner emissions burned via owner UID
 EVAL_START_BLOCK = 0
-# Shadow mode runs real evals and logs results, but always sets weights to owner UID 74.
-SHADOW_MODE = False
 
 _EVAL_CACHE_ENABLED = os.getenv("TRAJECTORYRL_EVAL_CACHE_ENABLED", "1") != "0"
 _EVAL_CACHE_TTL_DAYS = int(os.getenv("TRAJECTORYRL_CACHE_TTL_DAYS", "7"))
@@ -225,10 +223,9 @@ class TrajectoryValidator:
             publish_pct=config.window_publish_pct,
             aggregate_pct=config.window_aggregate_pct,
         )
-        # Whether this window's evaluation results have been submitted to CAS
-        self._window_submitted: bool = False
-        # Whether this window's consensus aggregation has been performed
-        self._window_aggregated: bool = False
+        # Which window's aggregation has completed (persisted in EMA state).
+        # Guards one-shot aggregation per window — survives restarts.
+        self._consensus_window: int = -1
 
         # Cycle log state — deferred until after aggregation completes
         self._cycle_eval_id: Optional[str] = None
@@ -252,9 +249,6 @@ class TrajectoryValidator:
             ),
         )
 
-        # Latest consensus results from aggregation (used by weight setting)
-        self._consensus_costs: Dict[str, float] = {}
-        self._consensus_qualified: Dict[str, bool] = {}
 
         # Miners disqualified during current window's evaluation (pre-eval, integrity)
         # Reset at each new eval cycle. Included in ConsensusPayload.
@@ -269,15 +263,7 @@ class TrajectoryValidator:
         # Set to True on startup when eval_on_startup=True; cleared after first eval
         self._startup_eval_pending: bool = config.eval_on_startup
 
-        # When True, tempo weight refreshes use fallback weights instead of
-        # computing from (potentially stale) EMA data.  Set when the eval
-        # cycle exits via a fallback path (no LLM key, all evals failed,
-        # no active miners) and cleared after a successful eval cycle.
-        self._eval_fallback_active: bool = False
 
-        # Last computed weights, cached for mid-eval tempo replays
-        self._last_weights_uids: Optional[List[int]] = None
-        self._last_weights: Optional[List[float]] = None
 
         # Load scenarios
         self.scenarios = self._load_scenarios()
@@ -292,7 +278,7 @@ class TrajectoryValidator:
         # Load persisted EMA state
         self._load_ema_state()
 
-        # Eval result cache: pack_hash -> {result, cached_at}
+        # Eval result cache: pack_hash -> {result, last_eval_at}
         self._eval_cache: Dict[str, dict] = {}
         self._load_eval_cache()
         self._validator_healthy: bool = True
@@ -410,8 +396,7 @@ class TrajectoryValidator:
             }
             self._last_eval_window = data.get("last_eval_window", -1)
 
-            self._consensus_costs = data.get("consensus_costs", {})
-            self._consensus_qualified = data.get("consensus_qualified", {})
+            self._consensus_window = data.get("consensus_window", -1)
 
             integrity_cache = data.get("integrity_cache")
             if integrity_cache:
@@ -432,8 +417,7 @@ class TrajectoryValidator:
             "eval_pack_hash": self._eval_pack_hash,
             "last_eval_block": self.last_eval_block,
             "last_eval_window": self._last_eval_window,
-            "consensus_costs": self._consensus_costs,
-            "consensus_qualified": self._consensus_qualified,
+            "consensus_window": self._consensus_window,
             "integrity_cache": self.integrity_judge.dump_cache(),
         }
         try:
@@ -469,7 +453,7 @@ class TrajectoryValidator:
             cutoff = time.time() - _EVAL_CACHE_TTL_DAYS * 86400
             self._eval_cache = {
                 k: v for k, v in data.items()
-                if v.get("cached_at", 0) > cutoff
+                if v.get("last_eval_at", 0) > cutoff
             }
             pruned = len(data) - len(self._eval_cache)
             logger.debug(
@@ -509,7 +493,7 @@ class TrajectoryValidator:
         if entry is None:
             return False, None
 
-        age_days = (time.time() - entry.get("cached_at", 0)) / 86400
+        age_days = (time.time() - entry.get("last_eval_at", 0)) / 86400
         if age_days > _EVAL_CACHE_TTL_DAYS:
             del self._eval_cache[pack_hash]
             logger.debug(
@@ -527,7 +511,7 @@ class TrajectoryValidator:
             return
         self._eval_cache[pack_hash] = {
             "result": eval_result,
-            "cached_at": time.time(),
+            "last_eval_at": time.time(),
         }
 
     # ------------------------------------------------------------------
@@ -900,8 +884,7 @@ class TrajectoryValidator:
             qualification_stake_threshold=self.config.qualification_stake_threshold,
         )
 
-        self._consensus_costs = consensus_costs
-        self._consensus_qualified = consensus_qualified
+        self._consensus_window = window.window_number
 
         # Apply Winner Protection
         winner_hk, updated_state = select_winner_with_protection(
@@ -913,20 +896,39 @@ class TrajectoryValidator:
         self._winner_state = updated_state
         save_winner_state(updated_state, self._winner_state_path)
 
-        if winner_hk:
-            logger.info(
-                "Window %d: winner = %s — "
-                "local state only, weights will be applied at next tempo",
-                window.window_number, winner_hk[:8],
-            )
+        # Build hotkey → UID mapping for logging
+        hk_to_uid: Dict[str, int] = {}
+        for uid in range(len(self.metagraph.hotkeys)):
+            hk_to_uid[self.metagraph.hotkeys[uid]] = uid
 
+        n_qualified = sum(1 for q in consensus_qualified.values() if q)
+        logger.info("=" * 60)
         logger.info(
-            "Window %d: consensus aggregation complete — %d miners, "
-            "%d validators contributed (%s). "
-            "Note: no on-chain weight change until next _compute_and_set_weights",
-            window.window_number, len(consensus_costs),
+            "Window %d: CONSENSUS RESULTS — %d miners (%d qualified), "
+            "%d validators (%s)",
+            window.window_number, len(consensus_costs), n_qualified,
             stats.passed, stats.summary(),
         )
+        logger.info(f"Burn fraction: {BURN_FRACTION:.0%} to owner UID {OWNER_UID}")
+        if winner_hk:
+            winner_uid = hk_to_uid.get(winner_hk, -1)
+            logger.info(
+                "Winner: %s (UID %d, cost=$%.4f, weight=%.4f)",
+                winner_hk[:8], winner_uid,
+                consensus_costs.get(winner_hk, 0),
+                1.0 - BURN_FRACTION,
+            )
+        else:
+            logger.info("No winner — all miners disqualified")
+        logger.info("=" * 60)
+        for hk, cost in sorted(consensus_costs.items(), key=lambda x: x[1]):
+            uid = hk_to_uid.get(hk, -1)
+            gate = "PASS" if consensus_qualified.get(hk, False) else "FAIL"
+            marker = " <- WINNER" if hk == winner_hk else ""
+            logger.info(
+                "  Miner %d (%s): cost=$%.4f, gate=%s%s",
+                uid, hk[:8], cost, gate, marker,
+            )
 
         self._save_ema_state()
 
@@ -1008,8 +1010,6 @@ class TrajectoryValidator:
                     self._last_eval_window = window.window_number
                     self._last_eval_date = datetime.datetime.utcnow().date()
                     self._startup_eval_pending = False
-                    self._window_submitted = False
-                    self._window_aggregated = False
                     self.last_weight_block = self.subtensor.get_current_block()
 
                     self.pack_fetcher.cleanup_cache(
@@ -1018,46 +1018,36 @@ class TrajectoryValidator:
                     self._save_ema_state()
                     self._save_eval_cache()
 
-                # --- Window phase: submission / propagation retry ---
+                # --- Window phase: submission (idempotent — checks on-chain) ---
                 if (window.phase == WindowPhase.PROPAGATION
-                        and not self._window_submitted
-                        and self._last_eval_window == window.window_number):
-                    if self._check_own_commitment_on_chain(window.window_number):
-                        logger.info(
-                            "Window %d: own commitment already on-chain, "
-                            "skipping re-submission",
+                        and self._last_eval_window == window.window_number
+                        and not self._check_own_commitment_on_chain(window.window_number)):
+                    logger.info(
+                        "Window %d: submitting evaluation results at block %d",
+                        window.window_number, current_block,
+                    )
+                    ok = await self._submit_consensus_payload(window)
+                    if not ok:
+                        logger.warning(
+                            "Window %d: submission attempt failed, "
+                            "will retry next loop iteration",
                             window.window_number,
                         )
-                        self._window_submitted = True
-                    else:
-                        logger.info(
-                            "Window %d: no own commitment on-chain at block %d, "
-                            "submitting evaluation results",
-                            window.window_number, current_block,
-                        )
-                        ok = await self._submit_consensus_payload(window)
-                        if ok:
-                            self._window_submitted = True
-                        else:
-                            logger.warning(
-                                "Window %d: submission attempt failed, "
-                                "will retry next loop iteration",
-                                window.window_number,
-                            )
 
-                # --- Window phase: aggregation (T_aggregate) ---
+                # --- Window phase: aggregation (idempotent — checks _consensus_window) ---
                 if (window.phase == WindowPhase.AGGREGATION
-                        and not self._window_aggregated
-                        and self._last_eval_window == window.window_number):
+                        and self._last_eval_window == window.window_number
+                        and self._consensus_window != window.window_number):
                     logger.info(
                         f"Window {window.window_number}: T_aggregate reached "
                         f"at block {current_block}, running consensus aggregation"
                     )
                     await self._run_consensus_aggregation(window)
-                    self._window_aggregated = True
 
-                    # Upload cycle logs after aggregation so submission &
-                    # consensus log lines are included.
+                    if self._consensus_window == window.window_number:
+                        await self._set_winner_weights()
+                        self.last_weight_block = current_block
+
                     if self._cycle_eval_id is not None:
                         asyncio.ensure_future(
                             self._fire_upload_cycle_logs(
@@ -1068,7 +1058,7 @@ class TrajectoryValidator:
                         )
                         self._cycle_eval_id = None
 
-                # --- Tempo cadence: re-set weights (independent of window) ---
+                # --- Tempo cadence: re-assert winner weights ---
                 current_block = self.subtensor.get_current_block()
                 blocks_since_weights = current_block - self.last_weight_block
                 if blocks_since_weights >= self.config.weight_interval_blocks:
@@ -1077,12 +1067,7 @@ class TrajectoryValidator:
                         f"({blocks_since_weights} blocks since last, "
                         f"window={window.window_number} phase={window.phase.value})"
                     )
-                    if self._eval_fallback_active:
-                        await self._set_fallback_weights(
-                            reason="Eval cycle in fallback mode"
-                        )
-                    else:
-                        await self._compute_and_set_weights(current_block)
+                    await self._set_winner_weights()
                     self.last_weight_block = current_block
 
                 await asyncio.sleep(60)
@@ -1248,18 +1233,15 @@ class TrajectoryValidator:
                 "CLAWBENCH_LLM_API_KEY not set. "
                 "Skipping evaluation, setting fallback weights to owner UID.",
             )
-            self._eval_fallback_active = True
             await self._set_fallback_weights(
                 reason="No LLM API key configured"
             )
             return
 
-        # Set weights from the previous eval's results before starting this
-        # eval cycle. This caches the computed weights for mid-eval replays,
-        # so the validator stays active on-chain even if eval takes longer
-        # than one tempo window.
-        logger.info("Setting weights from consensus before starting eval cycle")
-        await self._compute_and_set_weights(current_block)
+        # Re-assert the current winner's weights before starting this eval
+        # cycle, so the validator is active on-chain from the start.
+        logger.info("Setting winner weights before starting eval cycle")
+        await self._set_winner_weights()
         self.last_weight_block = current_block
 
         self._disqualified_miners = {}
@@ -1296,7 +1278,6 @@ class TrajectoryValidator:
                 "Skipping eval cycle. This usually means the subtensor "
                 "endpoint is unreachable or returning stale data."
             )
-            self._eval_fallback_active = True
             return
 
         # 3. Read on-chain commitments
@@ -1314,7 +1295,6 @@ class TrajectoryValidator:
 
         if not active_commitments:
             logger.warning("No active miners with valid commitments!")
-            self._eval_fallback_active = True
             await self._set_fallback_weights()
             return
 
@@ -1567,16 +1547,15 @@ class TrajectoryValidator:
                     f"(pack fetch/integrity failed)"
                 )
 
-            # Mid-eval tempo refresh: replay the last computed weights so
-            # the validator stays active on-chain without exposing partial
-            # current-cycle results.
+            # Mid-eval tempo refresh: re-assert the current winner's weights
+            # to keep the validator active on-chain without recomputing.
             mid_block = self.subtensor.get_current_block()
             if mid_block - self.last_weight_block >= self.config.weight_interval_blocks:
                 logger.info(
                     f"Mid-eval tempo refresh at block {mid_block} "
                     f"({mid_block - self.last_weight_block} blocks since last set_weights)"
                 )
-                await self._replay_last_weights()
+                await self._set_winner_weights()
                 self.last_weight_block = mid_block
 
         parts = [f"{evaluated_count} evaluated"]
@@ -1621,19 +1600,15 @@ class TrajectoryValidator:
                 "Setting fallback weights to owner UID."
             )
             self._validator_healthy = False
-            self._eval_fallback_active = True
             await self._set_fallback_weights(
                 reason="All evaluations failed (LLM error)"
             )
             return
 
-        # Eval completed successfully — mark validator healthy and clear
-        # fallback flag so tempo refreshes use real computed weights.
         self._validator_healthy = True
-        self._eval_fallback_active = False
 
-        # 5. Set weights from consensus costs (or fallback if no consensus yet)
-        await self._compute_and_set_weights(current_block)
+        # 5. Re-assert winner weights after eval completes
+        await self._set_winner_weights()
 
     def _should_run_eval_today(self) -> bool:
         """Return True if an eval should be triggered now.
@@ -2431,188 +2406,52 @@ class TrajectoryValidator:
     # Weight setting
     # ------------------------------------------------------------------
 
-    async def _compute_and_set_weights(self, current_block: int):
-        """Compute weights from consensus or local EMA, set on-chain, and cache.
+    async def _set_winner_weights(self):
+        """Set on-chain weights from persisted WinnerState.
 
-        After consensus aggregation completes (_window_aggregated=True and
-        _consensus_costs is populated), uses stake-weighted consensus costs
-        and qualification. Otherwise falls back to local EMA state.
-
-        Maps hotkey -> UID via metagraph, applies winner selection,
-        and calls set_weights. The resulting uids/weights are cached in
-        self._last_weights_uids / self._last_weights for mid-eval replays.
+        Uses the winner determined during consensus aggregation (persisted
+        in winner_state.json).  Maps winner hotkey → UID via metagraph,
+        applies burn fraction, and calls set_weights.
         """
-        mg_healthy = self._sync_metagraph(caller="set_weights")
-        if not mg_healthy:
-            logger.error(
-                "Metagraph unhealthy (n=%d) — cannot compute weights. "
-                "Falling back to owner UID, but set_weights may also "
-                "fail silently. Investigate subtensor connectivity.",
-                getattr(self.metagraph, "n", 0),
+
+        winner_hk = self._winner_state.winner_hotkey
+        if not winner_hk:
+            await self._set_fallback_weights(reason="No winner in WinnerState")
+            return
+
+        winner_uid = None
+        try:
+            hotkeys = self.metagraph.hotkeys
+            for uid in range(len(hotkeys)):
+                if hotkeys[uid] == winner_hk:
+                    winner_uid = uid
+                    break
+        except Exception:
+            pass
+
+        if winner_uid is None:
+            logger.warning(
+                "Winner %s not found in metagraph — setting fallback weights",
+                winner_hk[:8],
             )
             await self._set_fallback_weights(
-                reason="Metagraph unhealthy (n=0)"
+                reason=f"Winner {winner_hk[:8]} not in metagraph"
             )
             return
 
-        # Read commitments to know which miners are currently valid
-        commitments = fetch_all_commitments(
-            self.subtensor, self.config.netuid, self.metagraph
-        )
-        active = self._get_active_miners_from_commitments(
-            commitments, current_block
-        )
-
-        if not active:
-            logger.warning("No active miners for weight setting")
-            await self._set_fallback_weights()
-            return
-
-        if not self._consensus_costs:
-            logger.info(
-                "No consensus data yet — using fallback weights until "
-                "first consensus aggregation completes"
-            )
-            await self._set_fallback_weights(
-                reason="No consensus data (pre-first-aggregation)"
-            )
-            return
-
-        scores: Dict[int, float] = {}
-        costs: Dict[int, float] = {}
-        qualified: Dict[int, bool] = {}
-        uid_to_hotkey: Dict[int, str] = {}
-
-        hotkey_to_uid: Dict[str, int] = {}
-        for uid, commitment in active.items():
-            hotkey_to_uid[commitment.hotkey] = uid
-            uid_to_hotkey[uid] = commitment.hotkey
-
-        for hotkey, consensus_cost in self._consensus_costs.items():
-            uid = hotkey_to_uid.get(hotkey)
-            if uid is None:
-                continue
-            costs[uid] = consensus_cost
-            qualified[uid] = self._consensus_qualified.get(hotkey, False)
-            scores[uid] = 1.0 if qualified[uid] else 0.0
-
-        logger.info(
-            "Weight setting using consensus costs (%d miners from %d active)",
-            len(costs), len(active),
-        )
-
-        if not scores:
-            logger.warning("All miners have zero EMA score")
-            await self._set_fallback_weights()
-            return
-
-        num_active = len(scores)
-
-        if not costs:
-            logger.warning("No cost data available, setting fallback weights")
-            await self._set_fallback_weights()
-            return
-
-        weights_dict = self.scorer.select_winner_by_cost(
-            costs=costs,
-            qualified=qualified,
-            first_mover_data={},
-            cost_delta=self.config.cost_delta,
-            num_active_miners=num_active,
-            uid_to_hotkey=uid_to_hotkey,
-            champion_hotkey=self._winner_state.winner_hotkey,
-        )
-
-        # Apply burn: scale miner weights by (1 - BURN_FRACTION),
-        # give BURN_FRACTION to owner UID (burned by the chain).
-        for uid in weights_dict:
-            weights_dict[uid] *= (1.0 - BURN_FRACTION)
-        weights_dict[OWNER_UID] = (
-            weights_dict.get(OWNER_UID, 0.0) + BURN_FRACTION
-        )
-
-        logger.info("=" * 60)
-        logger.info("ON-CHAIN WEIGHT SUBMISSION (source: consensus costs)")
-        logger.info(f"Burn fraction: {BURN_FRACTION:.0%} to owner UID {OWNER_UID}")
-        logger.info("=" * 60)
-        for uid, weight in sorted(
-            weights_dict.items(),
-            key=lambda x: costs.get(x[0], scores.get(x[0], 0)),
-        ):
-            if uid == OWNER_UID and uid not in uid_to_hotkey:
-                logger.info(
-                    f"  Owner UID {uid}: weight={weight:.4f} (burn)"
-                )
-                continue
-            marker = ""
-            hk = uid_to_hotkey.get(uid, "?")
-            if weight > 0:
-                marker = " <- ON-CHAIN WINNER" if weight == 0.5 else f" <- TOP-{sum(1 for u, w in weights_dict.items() if w >= weight and u != OWNER_UID)}"
-            gate = "PASS" if qualified.get(uid, False) else "FAIL"
-            cost_str = f"${costs[uid]:.4f}" if uid in costs else "n/a"
-            logger.info(
-                f"  Miner {uid} ({hk[:8]}): weight={weight:.4f}, "
-                f"cost={cost_str}, gate={gate}, "
-                f"score={scores.get(uid, 0):.3f}{marker}"
-            )
-
-        # Set weights on chain
-        if SHADOW_MODE:
-            await self._set_fallback_weights(reason="SHADOW MODE: eval complete")
+        if winner_uid == OWNER_UID:
+            uids = [OWNER_UID]
+            weights = [1.0]
         else:
-            uids = list(weights_dict.keys())
-            weights = [weights_dict[uid] for uid in uids]
-            logger.info(
-                "Calling set_weights: uids=%s, weights=%s",
-                uids, [f"{w:.4f}" for w in weights],
-            )
-            try:
-                result = self.subtensor.set_weights(
-                    netuid=self.config.netuid,
-                    wallet=self.wallet,
-                    uids=uids,
-                    weights=weights,
-                    wait_for_inclusion=True,
-                    wait_for_finalization=False,
-                )
-                success = getattr(result, "success", None)
-                message = getattr(result, "message", str(result))
-                if success is False:
-                    logger.error(
-                        "set_weights FAILED on-chain — "
-                        "success=%s, message=%s, uids=%s. "
-                        "On-chain weights NOT updated.",
-                        success, message, uids,
-                    )
-                else:
-                    logger.info(
-                        "On-chain set_weights committed — "
-                        "success=%s, message=%s, uids=%s",
-                        success, message, uids,
-                    )
-                    self._last_set_weights_at = int(time.time())
-                    self._last_weights_uids = uids
-                    self._last_weights = weights
-            except Exception as e:
-                logger.error("Error setting weights: %s", e, exc_info=True)
+            uids = [winner_uid, OWNER_UID]
+            weights = [1.0 - BURN_FRACTION, BURN_FRACTION]
 
-    async def _replay_last_weights(self):
-        """Re-set the last computed weights on-chain without recomputing.
-
-        Used for mid-eval tempo refreshes to keep the validator active
-        while eval is still running. Falls back to fallback weights if
-        no previous weights are cached.
-        """
-        if self._last_weights_uids is None or self._last_weights is None:
-            logger.info("No cached weights to replay, setting fallback weights")
-            await self._set_fallback_weights(reason="No cached weights for replay")
-            return
         try:
             result = self.subtensor.set_weights(
                 netuid=self.config.netuid,
                 wallet=self.wallet,
-                uids=self._last_weights_uids,
-                weights=self._last_weights,
+                uids=uids,
+                weights=weights,
                 wait_for_inclusion=True,
                 wait_for_finalization=False,
             )
@@ -2620,18 +2459,18 @@ class TrajectoryValidator:
             message = getattr(result, "message", str(result))
             if success is False:
                 logger.error(
-                    "Replay set_weights FAILED — success=%s, message=%s, "
-                    "uids=%s", success, message, self._last_weights_uids,
+                    "Mid-eval set_weights FAILED — success=%s, message=%s",
+                    success, message,
                 )
             else:
                 logger.info(
-                    "On-chain set_weights replayed (cached) — "
-                    "success=%s, message=%s, uids=%s",
-                    success, message, self._last_weights_uids,
+                    "Mid-eval weights set (winner=%s UID %d) — "
+                    "success=%s, message=%s",
+                    winner_hk[:8], winner_uid, success, message,
                 )
                 self._last_set_weights_at = int(time.time())
         except Exception as e:
-            logger.error("Error replaying weights: %s", e, exc_info=True)
+            logger.error("Error setting mid-eval weights: %s", e, exc_info=True)
 
     def _fallback_owner_weights(self) -> Optional[Tuple[list, list]]:
         """Read on-chain weights set by OWNER_UID and return (uids, weights).
