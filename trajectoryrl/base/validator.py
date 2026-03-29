@@ -62,6 +62,7 @@ from ..utils.commitments import (
     MinerCommitment, fetch_all_commitments,
     ValidatorConsensusCommitment, fetch_validator_consensus_commitments,
     format_consensus_commitment,
+    is_consensus_commitment, parse_consensus_commitment,
 )
 from ..utils.ncd import deduplicate_packs
 from ..utils.status_reporter import (
@@ -718,8 +719,88 @@ class TrajectoryValidator:
                 logger.warning("Heartbeat error: %s", e)
             await asyncio.sleep(600)
 
-    async def _submit_consensus_payload(self, window: EvaluationWindow):
-        """Build and upload consensus payload to CAS, then write pointer on-chain."""
+    def _check_own_commitment_on_chain(self, window_number: int) -> bool:
+        """Check if this validator's consensus commitment exists on-chain for the given window."""
+        my_hotkey = self.wallet.hotkey.ss58_address
+        try:
+            raw_commitments = self.subtensor.get_all_commitments(
+                netuid=self.config.netuid,
+            )
+        except Exception as e:
+            logger.warning(
+                "Window %d: failed to read on-chain commitments for self-check: %s",
+                window_number, e,
+            )
+            return False
+
+        if not raw_commitments:
+            return False
+
+        raw = raw_commitments.get(my_hotkey)
+        if not raw or not is_consensus_commitment(raw):
+            return False
+
+        parsed = parse_consensus_commitment(raw)
+        if parsed is None:
+            return False
+
+        _, on_chain_window, _ = parsed
+        return on_chain_window == window_number
+
+    async def _submit_consensus_payload(self, window: EvaluationWindow) -> bool:
+        """Build and upload consensus payload to CAS, then write pointer on-chain.
+
+        Returns True if the on-chain commitment was written successfully,
+        False otherwise (caller may retry).
+        """
+        payload = self._build_local_consensus_payload(window)
+        if payload is None:
+            logger.warning(
+                "Window %d: no evaluation data to submit", window.window_number
+            )
+            return False
+
+        content_address = await self._consensus_store.upload_payload(payload)
+        if content_address is None:
+            logger.error(
+                "Window %d: failed to upload consensus payload",
+                window.window_number,
+            )
+            return False
+
+        commitment_str = format_consensus_commitment(
+            protocol_version=self.config.consensus_protocol_version,
+            window_number=window.window_number,
+            content_address=content_address,
+        )
+        try:
+            self.subtensor.set_commitment(
+                wallet=self.wallet,
+                netuid=self.config.netuid,
+                data=commitment_str,
+            )
+            logger.info(
+                "Window %d: consensus pointer written on-chain "
+                "(address=%s, %d miners, commitment=%s)",
+                window.window_number, content_address[:24],
+                len(payload.costs), commitment_str[:60],
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "Window %d: failed to write consensus pointer on-chain: %s",
+                window.window_number, e,
+            )
+            return False
+
+    def _build_local_consensus_payload(
+        self, window: EvaluationWindow,
+    ) -> Optional[ConsensusPayload]:
+        """Build a ConsensusPayload from in-memory evaluation data.
+
+        Used as a fallback when this validator's submission is absent from
+        CAS/chain during aggregation.  Returns None if no eval data exists.
+        """
         from clawbench import __version__ as clawbench_version
 
         costs_by_hotkey: Dict[str, float] = {}
@@ -741,12 +822,9 @@ class TrajectoryValidator:
             disqualified_by_hotkey[hotkey] = reason
 
         if not costs_by_hotkey and not disqualified_by_hotkey:
-            logger.warning(
-                "Window %d: no evaluation data to submit", window.window_number
-            )
-            return
+            return None
 
-        payload = ConsensusPayload(
+        return ConsensusPayload(
             protocol_version=self.config.consensus_protocol_version,
             window_number=window.window_number,
             validator_hotkey=self.wallet.hotkey.ss58_address,
@@ -756,37 +834,6 @@ class TrajectoryValidator:
             timestamp=int(time.time()),
             disqualified=disqualified_by_hotkey,
         )
-
-        content_address = await self._consensus_store.upload_payload(payload)
-        if content_address is None:
-            logger.error(
-                "Window %d: failed to upload consensus payload",
-                window.window_number,
-            )
-            return
-
-        commitment_str = format_consensus_commitment(
-            protocol_version=self.config.consensus_protocol_version,
-            window_number=window.window_number,
-            content_address=content_address,
-        )
-        try:
-            self.subtensor.set_commitment(
-                wallet=self.wallet,
-                netuid=self.config.netuid,
-                data=commitment_str,
-            )
-            logger.info(
-                "Window %d: consensus pointer written on-chain "
-                "(address=%s, %d miners, commitment=%s)",
-                window.window_number, content_address[:24],
-                len(costs_by_hotkey), commitment_str[:60],
-            )
-        except Exception as e:
-            logger.error(
-                "Window %d: failed to write consensus pointer on-chain: %s",
-                window.window_number, e,
-            )
 
     async def _run_consensus_aggregation(self, window: EvaluationWindow):
         """Read on-chain consensus pointers, download payloads, filter, aggregate."""
@@ -821,6 +868,33 @@ class TrajectoryValidator:
             )
             if payload is not None:
                 submissions.append((pointer, payload))
+
+        # Check if own submission is present; inject local data if missing
+        my_hotkey = self.wallet.hotkey.ss58_address
+        own_found = any(
+            p.validator_hotkey == my_hotkey for p, _ in submissions
+        )
+        if not own_found:
+            local_payload = self._build_local_consensus_payload(window)
+            if local_payload is not None:
+                local_pointer = ConsensusPointer(
+                    protocol_version=self.config.consensus_protocol_version,
+                    window_number=window.window_number,
+                    content_address="local:" + my_hotkey[:16],
+                    validator_hotkey=my_hotkey,
+                )
+                submissions.append((local_pointer, local_payload))
+                logger.info(
+                    "Window %d: own submission not found in CAS downloads, "
+                    "injected local in-memory evaluation data",
+                    window.window_number,
+                )
+            else:
+                logger.warning(
+                    "Window %d: own submission missing and no local eval data "
+                    "available to inject",
+                    window.window_number,
+                )
 
         if not submissions:
             logger.warning(
@@ -978,16 +1052,32 @@ class TrajectoryValidator:
                     self._save_ema_state()
                     self._save_eval_cache()
 
-                # --- Window phase: submission (T_publish) ---
+                # --- Window phase: submission / propagation retry ---
                 if (window.phase == WindowPhase.PROPAGATION
                         and not self._window_submitted
                         and self._last_eval_window == window.window_number):
-                    logger.info(
-                        f"Window {window.window_number}: T_publish reached "
-                        f"at block {current_block}, submitting evaluation results"
-                    )
-                    await self._submit_consensus_payload(window)
-                    self._window_submitted = True
+                    if self._check_own_commitment_on_chain(window.window_number):
+                        logger.info(
+                            "Window %d: own commitment already on-chain, "
+                            "skipping re-submission",
+                            window.window_number,
+                        )
+                        self._window_submitted = True
+                    else:
+                        logger.info(
+                            "Window %d: no own commitment on-chain at block %d, "
+                            "submitting evaluation results",
+                            window.window_number, current_block,
+                        )
+                        ok = await self._submit_consensus_payload(window)
+                        if ok:
+                            self._window_submitted = True
+                        else:
+                            logger.warning(
+                                "Window %d: submission attempt failed, "
+                                "will retry next loop iteration",
+                                window.window_number,
+                            )
 
                 # --- Window phase: aggregation (T_aggregate) ---
                 if (window.phase == WindowPhase.AGGREGATION
