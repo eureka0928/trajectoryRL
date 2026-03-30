@@ -898,6 +898,7 @@ class TrajectoryValidator:
             state=self._winner_state,
             cost_delta=self.config.cost_delta,
             hk_to_uid=hk_to_uid,
+            disable_winner_protection=self.config.disable_winner_protection,
         )
         self._winner_state = updated_state
         save_winner_state(updated_state, self._winner_state_path)

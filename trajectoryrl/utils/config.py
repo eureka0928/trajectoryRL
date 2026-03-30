@@ -118,6 +118,10 @@ class ValidatorConfig:
     # Startup aggregation: run consensus aggregation before entering main loop
     aggregate_when_start: bool = True
 
+    # Disable winner protection to force all validators to converge on the
+    # same lowest-cost winner (use once to clear divergent cached state).
+    disable_winner_protection: bool = False
+
     # ClawBench LLM configuration (passed to init container & OpenClaw gateway)
     clawbench_default_model: str = DEFAULT_CLAWBENCH_MODEL
     clawbench_api_key: str = ""
@@ -216,6 +220,7 @@ class ValidatorConfig:
             consensus_api_url=os.getenv("CONSENSUS_API_URL", "https://trajrl.com"),
             # --- Startup aggregation ---
             aggregate_when_start=os.getenv("AGGREGATE_WHEN_START", "1") == "1",
+            disable_winner_protection=os.getenv("DISABLE_WINNER_PROTECTION", "1") == "1",
             # --- IM parameters are hardcoded (dataclass defaults) ---
             # Do NOT load from env: cost_delta,
             # rho_reliability, consensus_epsilon, bootstrap_threshold,
