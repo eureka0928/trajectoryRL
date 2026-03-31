@@ -1107,11 +1107,7 @@ class TrajectoryValidator:
                     e, exc_info=True,
                 )
 
-        # --- One-time replay for specific windows, then pending uploads ---
-        try:
-            await self._onetime_replay_logs()
-        except Exception as e:
-            logger.warning("One-time log replay failed: %s", e, exc_info=True)
+        # --- Replay pending uploads from recent days ---
         try:
             await self._replay_pending_uploads()
         except Exception as e:
@@ -2524,140 +2520,8 @@ class TrajectoryValidator:
             logger.warning("Cycle log upload error: %s", e)
 
     # ------------------------------------------------------------------
-    # Log replay (one-time + startup)
+    # Log replay (startup)
     # ------------------------------------------------------------------
-
-    _ONETIME_REPLAY_DATE_PREFIXES = ["20260330"]
-
-    def _resolve_hotkey_prefix(self, prefix: str) -> Optional[Tuple[str, int]]:
-        """Resolve a hotkey[:16] prefix to (full_hotkey, uid) via metagraph."""
-        try:
-            hotkeys = self.metagraph.hotkeys
-            for uid in range(len(hotkeys)):
-                if hotkeys[uid][:16] == prefix:
-                    return hotkeys[uid], uid
-        except Exception:
-            pass
-        return None
-
-    async def _onetime_replay_logs(self):
-        """One-time replay of eval/cycle logs for a specific date range.
-
-        Scans local eval directories matching the target date prefixes,
-        rebuilds upload metadata from metagraph, and re-uploads any logs
-        that lack an .uploaded marker.  Writes a done-marker so this
-        only runs once per validator instance.
-        """
-        date_prefixes = self._ONETIME_REPLAY_DATE_PREFIXES
-        if not date_prefixes:
-            return
-
-        tag = "_".join(date_prefixes)
-        done_marker = self.config.log_dir / f".replay_{tag}_done"
-        if done_marker.exists():
-            return
-
-        evals_root = self.config.log_dir / "evals"
-        if not evals_root.exists():
-            done_marker.touch()
-            return
-
-        self._sync_metagraph(caller="onetime_replay_logs")
-
-        logger.info(
-            "One-time log replay: scanning for date prefixes %s",
-            date_prefixes,
-        )
-        eval_uploaded = 0
-        cycle_uploaded = 0
-
-        for eval_id_dir in sorted(evals_root.iterdir()):
-            if not eval_id_dir.is_dir():
-                continue
-            if not any(eval_id_dir.name.startswith(p) for p in date_prefixes):
-                continue
-
-            eval_id = eval_id_dir.name
-
-            # --- Per-miner eval logs ---
-            for miner_dir in sorted(eval_id_dir.iterdir()):
-                if not miner_dir.is_dir():
-                    continue
-                if (miner_dir / ".uploaded").exists():
-                    continue
-
-                prefix = miner_dir.name
-                resolved = self._resolve_hotkey_prefix(prefix)
-                if resolved is None:
-                    logger.debug(
-                        "Replay: cannot resolve hotkey prefix %s, skipping",
-                        prefix,
-                    )
-                    continue
-                full_hotkey, uid = resolved
-
-                archive = self._repack_directory(miner_dir)
-                if archive is None:
-                    continue
-
-                ok = await upload_eval_logs(
-                    self.wallet,
-                    eval_id=eval_id,
-                    miner_hotkey=full_hotkey,
-                    miner_uid=uid,
-                    block_height=0,
-                    pack_hash="unknown",
-                    log_archive=archive,
-                )
-                if ok:
-                    eval_uploaded += 1
-                    try:
-                        (miner_dir / ".uploaded").touch()
-                    except OSError:
-                        pass
-                logger.info(
-                    "Replay eval log: %s/%s -> %s",
-                    eval_id, prefix, "OK" if ok else "FAILED",
-                )
-
-            # --- Cycle logs ---
-            if (eval_id_dir / ".cycle_uploaded").exists():
-                continue
-            cycle_log = eval_id_dir / "validator.log"
-            if not cycle_log.exists():
-                continue
-
-            cycle_archive = self._repack_directory(
-                eval_id_dir, filenames=["validator.log"],
-            )
-            if cycle_archive is None:
-                continue
-
-            ok = await upload_cycle_logs(
-                self.wallet,
-                eval_id=eval_id,
-                block_height=0,
-                log_archive=cycle_archive,
-            )
-            if ok:
-                cycle_uploaded += 1
-                try:
-                    (eval_id_dir / ".cycle_uploaded").touch()
-                except OSError:
-                    pass
-            logger.info(
-                "Replay cycle log: %s -> %s",
-                eval_id, "OK" if ok else "FAILED",
-            )
-
-        logger.info(
-            "One-time log replay complete: %d eval + %d cycle logs uploaded",
-            eval_uploaded, cycle_uploaded,
-        )
-        try:
-            done_marker.touch()
-        except OSError:
-            pass
 
     async def _replay_pending_uploads(self):
         """Re-upload logs from the last 2 days that have metadata but no .uploaded marker."""
@@ -2745,49 +2609,6 @@ class TrajectoryValidator:
                 "Startup log replay: re-uploaded %d eval + %d cycle logs",
                 eval_uploaded, cycle_uploaded,
             )
-
-    @staticmethod
-    def _repack_directory(
-        directory: Path,
-        *,
-        filenames: Optional[List[str]] = None,
-    ) -> Optional[bytes]:
-        """Re-archive files in a directory as tar.gz.
-
-        If *filenames* is given, only those files are included;
-        otherwise all files (excluding marker/meta files) are packed.
-        """
-        import io
-        import tarfile
-
-        _EXCLUDE = {".uploaded", ".cycle_uploaded", "upload_meta.json",
-                     "cycle_upload_meta.json", "logs.tar.gz", "cycle.tar.gz"}
-        try:
-            buf = io.BytesIO()
-            added = 0
-            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-                candidates = (
-                    [directory / fn for fn in filenames]
-                    if filenames
-                    else sorted(directory.iterdir())
-                )
-                for child in candidates:
-                    if not isinstance(child, Path):
-                        child = Path(child)
-                    if not child.exists() or not child.is_file():
-                        continue
-                    if child.name in _EXCLUDE:
-                        continue
-                    tar.add(str(child), arcname=child.name)
-                    added += 1
-            if added == 0:
-                return None
-            archive = buf.getvalue()
-            if len(archive) > 10 * 1024 * 1024:
-                return None
-            return archive
-        except Exception:
-            return None
 
     # ------------------------------------------------------------------
     # Weight setting
