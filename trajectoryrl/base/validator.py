@@ -230,7 +230,7 @@ class TrajectoryValidator:
         # Guards one-shot aggregation per window — survives restarts.
         self._consensus_window: int = -1
 
-        # Cycle log state — deferred until after aggregation completes
+        # Cycle log state — uploaded after each window phase completes
         self._cycle_eval_id: Optional[str] = None
         self._cycle_log_offset: int = 0
         self._cycle_log_block: int = 0
@@ -1153,6 +1153,15 @@ class TrajectoryValidator:
                     self._save_ema_state()
                     self._save_eval_cache()
 
+                    if self._cycle_eval_id is not None:
+                        asyncio.ensure_future(
+                            self._fire_upload_cycle_logs(
+                                self._cycle_eval_id,
+                                self._cycle_log_offset,
+                                self._cycle_log_block,
+                            )
+                        )
+
                 # --- Window phase: submission (idempotent — checks on-chain) ---
                 if (window.phase == WindowPhase.PROPAGATION
                         and not self._check_own_commitment_on_chain(window.window_number)):
@@ -1166,6 +1175,15 @@ class TrajectoryValidator:
                             "Window %d: submission attempt failed, "
                             "will retry next loop iteration",
                             window.window_number,
+                        )
+
+                    if self._cycle_eval_id is not None:
+                        asyncio.ensure_future(
+                            self._fire_upload_cycle_logs(
+                                self._cycle_eval_id,
+                                self._cycle_log_offset,
+                                self._cycle_log_block,
+                            )
                         )
 
                 # --- Window phase: aggregation (idempotent — checks _consensus_window) ---
@@ -1291,9 +1309,10 @@ class TrajectoryValidator:
     ):
         """Run one evaluation cycle.
 
-        Cycle log upload is deferred — the log offset is saved to instance
-        state so the main loop can upload after aggregation completes,
-        capturing submission and consensus logs as well.
+        The log offset is saved to instance state so the main loop can
+        upload after each window phase (evaluation, submission,
+        aggregation), progressively capturing more context.  The server
+        is expected to handle duplicate/overlapping uploads.
         """
         cycle_start = time.time()
         cycle_eval_id = time.strftime("%Y%m%d_%H%M") + f"_w{window_number}"
