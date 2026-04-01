@@ -178,6 +178,10 @@ class TrajRLAPIBackend(CASBackend):
                 ) as resp:
                     if resp.status in (200, 409):
                         result = await resp.json()
+                        short_url = result.get("short_url")
+                        if short_url:
+                            logger.info("API upload OK: short_url=%s", short_url)
+                            return short_url
                         public_url = result.get("url")
                         if public_url:
                             logger.info("API upload OK: url=%s", public_url)

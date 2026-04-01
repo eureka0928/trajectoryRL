@@ -61,7 +61,7 @@ from ..utils.winner_state import (
 from ..utils.commitments import (
     MinerCommitment, fetch_all_commitments,
     ValidatorConsensusCommitment, fetch_validator_consensus_commitments,
-    format_consensus_commitment,
+    format_consensus_commitment, decode_dual_address,
     is_consensus_commitment, parse_consensus_commitment,
 )
 from ..utils.ncd import deduplicate_packs
@@ -758,12 +758,30 @@ class TrajectoryValidator:
             )
             return False
 
+        MAX_COMMITMENT_BYTES = 128
+
         commitment_str = format_consensus_commitment(
             protocol_version=self.config.consensus_protocol_version,
             window_number=window.window_number,
             content_address=content_address,
             scoring_version=SCORING_VERSION,
         )
+
+        if len(commitment_str.encode("utf-8")) > MAX_COMMITMENT_BYTES:
+            ipfs_cid, _ = decode_dual_address(content_address)
+            fallback_address = ipfs_cid or content_address
+            commitment_str = format_consensus_commitment(
+                protocol_version=self.config.consensus_protocol_version,
+                window_number=window.window_number,
+                content_address=fallback_address,
+                scoring_version=SCORING_VERSION,
+            )
+            logger.warning(
+                "Window %d: commitment too long with dual address, "
+                "using IPFS-only (%d bytes)",
+                window.window_number, len(commitment_str.encode("utf-8")),
+            )
+
         try:
             self.subtensor.set_commitment(
                 wallet=self.wallet,
@@ -772,9 +790,10 @@ class TrajectoryValidator:
             )
             logger.info(
                 "Window %d: consensus pointer written on-chain "
-                "(address=%s, %d miners, commitment=%s)",
+                "(address=%s, %d miners, commitment=%s, %d bytes)",
                 window.window_number, content_address[:24],
                 len(payload.costs), commitment_str[:60],
+                len(commitment_str.encode("utf-8")),
             )
             return True
         except Exception as e:
