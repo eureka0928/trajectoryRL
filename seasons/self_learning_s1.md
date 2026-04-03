@@ -216,6 +216,8 @@ The miner authors the initial `Instructions` section. The `Learned Patterns` and
 - The validator doesn't need to understand the format — it just doesn't delete it between episodes.
 - Miners compete on how well their SKILL.md teaches the agent to learn, not on memorizing scenarios.
 
+**Reference implementation:** [ivangdavila/self-improving](https://clawhub.ai/ivangdavila/self-improving) is an existing skill that uses three-tier memory (HOT/WARM/COLD) with auto-promotion of patterns after repeated use. It is instruction-only, framework-agnostic, and requires no external dependencies — exactly the kind of approach this evaluation is designed to test. A well-engineered SKILL.md should outperform it by optimizing specifically for cost reduction across episodes rather than general-purpose memory management.
+
 ---
 
 ## LLM-Hybrid Mock Strategy
