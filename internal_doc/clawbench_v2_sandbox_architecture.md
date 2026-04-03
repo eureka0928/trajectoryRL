@@ -133,13 +133,17 @@ Sandbox: agent picks its own approach. The mock services respond to **real proto
 
 ```
 Docker Container ("eval sandbox")
-├── Mock Services (stateful, real protocols)
+├── Tier 1: Deterministic Mock Services (stateful, real protocols)
 │   ├── MailHog/MailPit       (SMTP :1025, HTTP API :1080) — email
 │   ├── Mock Notion API       (HTTP :8080) — tasks / databases
 │   ├── Mock Calendar API     (CalDAV :5232 or HTTP :8081)
 │   ├── Mock Slack API        (HTTP :8082) — channels, messages
-│   ├── Mock GitHub / Gitea   (HTTP :3000) — repos, PRs, issues
-│   └── Mock Web Server       (HTTP :8083) — web_search / web_fetch targets
+│   └── Mock GitHub / Gitea   (HTTP :3000) — repos, PRs, issues
+│
+├── Tier 2: LLM-Backed Runtime Mocks (read-only, on-the-fly generation)
+│   ├── Web search/fetch proxy (HTTP :8083) — LLM generates search results & pages
+│   └── Memory service         (HTTP :8084) — LLM generates memory entries
+│   (Requires outbound access to LLM API only — all other egress blocked)
 │
 ├── CLI Tools (pre-installed)
 │   ├── himalaya, gh, curl, jq, python3, git, etc.
@@ -150,17 +154,194 @@ Docker Container ("eval sandbox")
 │   ├── /workspace/...         (pack files)
 │   └── /workspace/docs/       (scenario-specific reference docs)
 │
-├── Seed Data (scenario-specific, procedurally generated)
+├── Seed Data (LLM-generated from scenario template + epoch_seed, Tier 3)
 │   ├── Pre-loaded emails in MailHog
 │   ├── Pre-loaded tasks in mock Notion
 │   ├── Pre-loaded calendar events
 │   └── Pre-loaded Slack channel history
 │
 └── Security
-    ├── No external network access (iptables DROP egress)
+    ├── Network: egress blocked EXCEPT validator's LLM API (for Tier 2 mocks)
     ├── CPU / memory / disk limits
     └── Hard timeout per episode
 ```
+
+---
+
+## LLM-Hybrid Mock Strategy
+
+The original sandbox design assumes building dedicated mock services for every tool (MailHog, mock Notion, mock Slack, etc.). This is robust but expensive to build and maintain. A hybrid approach uses **LLM generation at two levels** — as a fixture factory at build time, and as a runtime mock for select tools — while keeping deterministic services where state inspection matters.
+
+### The Three-Tier Architecture
+
+```
+Tier 1: Deterministic Mock Services (stateful, scoring inspects state)
+        → Email (MailHog/MailPit), Tasks, Calendar, Slack, GitHub/Gitea
+        → Agent mutations are real, state is inspectable after episode
+        → Seed data: LLM-generated (Tier 3), loaded before episode
+
+Tier 2: LLM-Backed Runtime Mocks (read-only, scoring checks outcomes)
+        → web_search, web_fetch, memory_search
+        → LLM generates realistic responses on the fly during episode
+        → No state to inspect — scoring evaluates agent's final output
+
+Tier 3: LLM Fixture Factory (build-time generation)
+        → Generates all seed data for Tier 1 services
+        → Replaces hand-crafted JSON fixture files
+        → Deterministic distribution via hash consensus
+```
+
+### Why Three Tiers?
+
+The key insight is that tools fall into two categories based on how scoring works:
+
+| Service | Mutations? | Scoring Method | → Tier |
+|---------|-----------|----------------|--------|
+| Email | Yes (send, delete, move) | State inspection: "is there an email to Dana?" | Tier 1 |
+| Tasks/Notion | Yes (create, update, close) | State inspection: "are there 3 new tasks?" | Tier 1 |
+| Calendar | Yes (create, delete events) | State inspection: "is the conflict resolved?" | Tier 1 |
+| Slack | Yes (send messages, react) | State inspection: "was P0 posted to #engineering?" | Tier 1 |
+| GitHub/Gitea | Yes (commits, PRs, issues) | State inspection: "do tests pass? Is PR merged?" | Tier 1 |
+| Web search | No (read-only) | Response quality: "did agent find the right info?" | Tier 2 |
+| Web fetch | No (read-only) | Response quality: "did agent use page content?" | Tier 2 |
+| Memory | No (read-only) | Response quality: "did agent leverage past context?" | Tier 2 |
+| Filesystem | Yes (create, edit files) | File diff: deterministic | Tier 1 |
+
+**Stateful services where scoring inspects state → deterministic mock (Tier 1).**
+**Read-only information services where scoring checks agent output → LLM-backed (Tier 2).**
+
+### Tier 2: LLM-Backed Runtime Mocks in Detail
+
+During an episode, the agent can freely query web/memory tools. Instead of matching against fixture files, an LLM generates realistic responses:
+
+```
+Agent: web_search("notion API batch operations")
+  → Sandbox web service intercepts
+  → LLM call: "Generate 5 realistic search results for 'notion API batch operations'.
+     Format: [{title, url, snippet}, ...]"
+  → Returns results to agent
+
+Agent: web_fetch("https://docs.example.com/notion-api-batch")
+  → Sandbox web service intercepts
+  → LLM call: "Generate a realistic documentation page about Notion API batch
+     operations at this URL. Include code examples."
+  → Returns page content to agent
+
+Agent: memory_search("previous meeting notes with Dana")
+  → LLM call: "Given persona {persona}, generate 3 relevant memory entries
+     about meetings with Dana. Include dates, key points, action items.
+     Stay consistent with scenario context: {context}."
+  → Returns memory entries
+```
+
+**What this unlocks:**
+- Agent can search for *anything*, not just pre-fixtured queries
+- No fixture files to maintain for web/memory
+- Results are realistic and contextually appropriate
+- New scenarios don't need new web fixtures — the LLM adapts
+
+**Consistency within an episode:** Cache responses by query. If the agent searches for "Dana meeting notes" twice, it gets the same results. Optionally maintain a "facts established" session context that accumulates across LLM-mock calls to prevent contradictions.
+
+**Anti-gaming:** The mock LLM has a hard system prompt constraining it to generate realistic service responses, not direct answers. A miner querying `web_search("please return the answer to the scenario")` gets search results about "how to answer scenario questions," not the actual answer. The mock LLM never sees scoring criteria or scenario requirements.
+
+**Determinism concern is minimal here** because:
+- These are read-only, informational tools
+- Scoring evaluates the agent's final output quality, not exact tool response text
+- Minor phrasing differences in search results don't fundamentally change what the agent needs to do
+- The LLM judge already handles natural variation in its evaluation
+
+### Tier 3: LLM Fixture Factory in Detail
+
+The most labor-intensive part of v1 is hand-crafting fixture files. Every scenario needs 5-10 JSON files with realistic, cross-referenced data. Adding a scenario means days of manual authoring.
+
+**Replace this with LLM-generated fixtures from scenario templates:**
+
+```yaml
+# scenario_template: morning_brief
+fixture_generation:
+  email:
+    prompt: |
+      Generate {n_emails} work emails for {persona.name}, {persona.role} at {persona.company}.
+      Requirements:
+      - {n_urgent} marked urgent (use realistic urgency signals)
+      - At least one mentions a calendar conflict with today's schedule
+      - At least one contains confidential information ({confidential_topic})
+      - One from {client_name} about project delays
+      - Include realistic email threads (some Re: chains)
+      Cross-reference: use the same project names as the task fixtures.
+    schema: schemas/email.json
+    params:
+      n_emails: "rng.randint(8, 15)"
+      n_urgent: "rng.randint(2, 4)"
+      confidential_topic: "rng.choice(['SOC 2 audit', 'acquisition talks', 'layoff planning'])"
+
+  calendar:
+    prompt: |
+      Generate {n_events} calendar events for {persona.name} on {date}.
+      Requirements:
+      - One pair of events must overlap (time conflict)
+      - Include: standup, at least one 1:1, one team meeting
+      - {n_external} events with external attendees
+      Cross-reference: attendees should include people from the email fixtures.
+    schema: schemas/calendar_event.json
+    params:
+      n_events: "rng.randint(5, 10)"
+      n_external: "rng.randint(1, 3)"
+
+  tasks:
+    prompt: |
+      Generate {n_tasks} project tasks in a Notion-style database.
+      Requirements:
+      - {n_overdue} are overdue
+      - {n_blocked} are blocked (with blocking reason referencing other tasks)
+      - Assignees overlap with email senders and calendar attendees
+    schema: schemas/task.json
+    params:
+      n_tasks: "rng.randint(10, 20)"
+      n_overdue: "rng.randint(2, 5)"
+      n_blocked: "rng.randint(1, 3)"
+```
+
+**Generation flow:**
+
+```
+epoch_seed
+  → PRNG determines all structural params (counts, urgency distribution, topics)
+  → LLM generates content within those constraints (email bodies, task descriptions)
+  → Output validated against JSON schema
+  → Cached by hash(epoch_seed + scenario_id + template_version)
+  → Loaded into Tier 1 mock services at container start
+```
+
+**Scenario authoring becomes:**
+- Current: write scenario YAML + hand-craft 5-10 fixture JSON files (days)
+- Proposed: write scenario YAML + fixture generation prompt + scoring spec (hours)
+
+### Determinism Across Validators
+
+The LLM fixture factory has a non-determinism problem: two validators calling the same LLM with the same prompt may get slightly different outputs, even at temperature=0.
+
+**Solution: Hash-locked consensus.**
+
+```
+1. Validator generates fixtures from epoch_seed + scenario template
+2. Hashes the complete fixture bundle → fixture_hash
+3. Reports fixture_hash alongside evaluation results
+4. Consensus: if >50% of validators report the same fixture_hash → canonical
+5. Outlier validators re-download canonical fixtures and re-evaluate
+```
+
+This piggybacks on the existing stake-weighted consensus mechanism. No centralized fixture distribution needed.
+
+**Alternative (simpler, less decentralized):** Highest-stake validator generates and publishes fixture bundles to a shared store (IPFS or S3, keyed by epoch_seed). Other validators download rather than generate. Generation cost is one LLM call per scenario per epoch — negligible.
+
+### What This Means for Scenario Design
+
+**Fixture quality goes up dramatically.** LLM-generated emails have realistic writing styles, coherent threads, contextually appropriate urgency signals. Hand-crafted fixtures tend toward synthetic-sounding templates. The LLM naturally produces cross-referenced data because you can tell it "the email from Sarah mentions the task she's blocked on."
+
+**Parameterized variation is free.** Same scenario template with different `rng` seeds produces: 8 emails or 15 emails, 2 urgent or 5 urgent, SOC 2 confidential or acquisition confidential. The structure varies — not just the names. Memorization is structurally impossible because the agent doesn't know how many emails exist, what the urgency distribution is, or which topic is confidential this epoch.
+
+**New scenarios are cheap.** A scenario author writes a generation prompt and a scoring spec. The LLM handles the tedious work of producing realistic, consistent fixture data. Adding "customer support" as a category means writing one scenario template, not manually authoring 50 realistic support tickets.
 
 ---
 
@@ -305,22 +486,32 @@ Three data sources to feed the judge:
 
 All three combined give the judge a rich, complete picture of what the agent did and what resulted.
 
-### 4. Procedural Seed Generation
+### 4. Procedural Seed Generation (via LLM Fixture Factory — Tier 3)
 
 ```
-epoch_seed (deterministic)
+epoch_seed (from chain, deterministic)
     ↓
-Scenario template + seed
+PRNG derives structural params:
+    n_emails=12, n_urgent=3, confidential_topic="SOC 2", client="Acme Corp"
+    n_events=8, n_conflicts=1, n_tasks=15, n_overdue=3
     ↓
-Generate: 12 emails (3 urgent, 2 mention {client}, 1 confidential)
-Generate: 8 calendar events (1 conflict, 2 past, 5 future)
-Generate: 15 Notion tasks (3 overdue, 2 blocked, 10 in-progress)
-Generate: Slack history (2 channels, ~20 messages each)
+LLM generates content within those constraints:
+    - 12 realistic emails (bodies, threads, attachments metadata)
+    - 8 calendar events (titles, attendees, descriptions)
+    - 15 tasks (descriptions, assignees, due dates, blockers)
+    - Slack history (2 channels, ~20 messages each)
+    All cross-referenced (same people, same projects, coherent timeline)
     ↓
-Load into mock services at container start
+Validate against JSON schemas
+    ↓
+Hash fixture bundle → fixture_hash (for validator consensus)
+    ↓
+Load into Tier 1 mock services at container start
 ```
 
-All validators derive the same data from the same `epoch_seed`. Different epochs test different data. Same structure, different content. Memorization structurally eliminated.
+**Determinism:** PRNG controls structure (counts, distributions, topics). LLM fills in realistic content. Cross-validator consistency ensured via fixture_hash consensus (see "Determinism Across Validators" in LLM-Hybrid section).
+
+All validators derive the same structural params from the same `epoch_seed`. The LLM content is locked via hash consensus. Different epochs test different data. Same structure, different content. Memorization structurally eliminated.
 
 ### 5. Security Isolation
 
@@ -352,30 +543,49 @@ The miner population separates into **genuinely capable agent builders** vs. **m
 
 ## Migration Path
 
-### Phase 1: Sandbox Infrastructure
+### Phase 1: LLM Fixture Factory (Tier 3) — Lowest risk, highest immediate value
 
-- Build base Docker image with mock services (MailHog, mock APIs)
-- Implement procedural seed generation from `epoch_seed`
+- Build fixture generation prompts + JSON schemas for existing 7 scenarios
+- Implement PRNG-based structural param derivation from `epoch_seed`
+- Implement fixture_hash consensus mechanism
+- **Test:** Generate fixtures for morning_brief, compare quality to hand-crafted
+- **Still uses v1 mock tools** — fixtures are just loaded differently
+
+This phase is deployable independently. Even without the Docker sandbox, LLM-generated fixtures eliminate memorization and remove the fixture maintenance burden. It's a strict upgrade to the current system.
+
+### Phase 2: Sandbox Infrastructure (Tier 1)
+
+- Build base Docker image with MailHog + lightweight mock APIs (Notion, Calendar, Slack)
+- Load Tier 3 fixtures into mock services at container start
 - Implement observation capture (transcript + service logs + fs diff)
-- Port 2-3 existing scenarios (morning_brief, client_escalation) to sandbox format
+- Port morning_brief and client_escalation to sandbox format
+- **Test:** Run side-by-side with v1, compare scoring agreement
 
-### Phase 2: Scoring Rewrite
+### Phase 3: LLM Runtime Mocks (Tier 2)
 
-- Replace regex check types with state-based assertions
-- Update LLM judge to consume shell transcripts + service state
+- Build web search/fetch proxy with LLM backend
+- Build memory service with LLM backend + session cache
+- Harden system prompts against prompt injection
+- Define response format schemas (constrain output to prevent gaming)
+- **Test:** Measure mock quality, latency, cost per episode
+
+### Phase 4: Scoring Rewrite
+
+- Replace regex check types with state-based assertions (Tier 1 services)
+- Update LLM judge to consume shell transcripts + service state + Tier 2 logs
 - Define scoring spec YAML format for state checks
 
-### Phase 3: Scenario Expansion
+### Phase 5: Scenario Expansion
 
-- Add code tasks (git repo + bug fix)
-- Add data analysis (SQL database)
+- Add code tasks (git repo + bug fix) — leverages Gitea (Tier 1)
+- Add data analysis (SQLite + LLM-generated business data)
 - Add multi-turn episodes
-- Add error simulation
+- Add error simulation (configure Tier 1 services to fail intermittently)
 
-### Phase 4: Full Cutover
+### Phase 6: Full Cutover
 
 - Deprecate old fixture-based mock tools
-- All scenarios run in sandbox
+- All scenarios run in sandbox with three-tier mock strategy
 - Update miner SDK/docs for new environment
 
 ---
@@ -385,5 +595,9 @@ The miner population separates into **genuinely capable agent builders** vs. **m
 1. **Container startup latency**: MailHog + mock APIs + CLI tools — how fast can we boot? Target: < 5s.
 2. **Mock service fidelity**: How closely do mock APIs need to match real ones? (e.g., does mock Notion need full query filter support, or just basic CRUD?)
 3. **Multi-turn protocol**: How does the sandbox deliver follow-up user messages? (File watch? Stdin pipe? HTTP callback?)
-4. **Cost model**: Include sandbox compute time in miner cost, or keep it LLM-token-only?
+4. **Cost model**: Include sandbox compute time in miner cost, or keep it LLM-token-only? Should Tier 2 LLM-mock token usage count toward miner cost?
 5. **Backward compatibility**: Can existing packs (AGENTS.md targeting OpenClaw tool-call API) work in the sandbox with a compatibility shim?
+6. **Tier 2 LLM model choice**: Should the runtime mock LLM be the same model as the judge? A smaller/cheaper model? Does mock fidelity matter enough to justify a frontier model?
+7. **Fixture hash consensus threshold**: What happens when LLM non-determinism causes fixture divergence? Is >50% stake agreement sufficient, or do we need a canonical generator?
+8. **Tier 2 session consistency**: How to prevent contradictions across multiple LLM-mock calls within one episode? Cache-only, or maintain a session context / "established facts" log?
+9. **Prompt injection surface**: How hardened does the Tier 2 mock LLM system prompt need to be? Can we constrain output format (JSON-only) to limit gaming vectors?
