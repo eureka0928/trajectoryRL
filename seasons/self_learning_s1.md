@@ -1,12 +1,12 @@
 # Season 1: Self-Learning Agents
 
-> Docker sandbox + SKILL.md + cost curve scoring. Miners compete on which agent learns fastest.
+> Docker sandbox evaluation with persistent SKILL.md and cost curve scoring for self-learning agents.
 
 ---
 
-## The Beauty of This Design
+## Design Principles
 
-The entire evaluation reduces to one observable: **the cost curve.**
+The evaluation reduces to one observable: **the cost curve.**
 
 ```
 Cost ($)
@@ -23,37 +23,31 @@ Cost ($)
 Score = the downward slope. Steeper = faster learner.
 ```
 
-No complex scoring rubrics. No multi-dimensional evaluation matrices. No per-episode scoring specs. Just: run a sequence of tasks, measure cost at each checkpoint, look at the line.
+Run a sequence of tasks, measure cost at each checkpoint, score the trend. A single metric — cost over time — captures learning directly: an agent that learns becomes more efficient.
 
-**Why this is elegant:**
-- One metric captures everything — an agent that learns becomes more efficient, period
-- It's self-evident — anyone can look at the chart and see who's learning
-- It's composable — works across any task type, any domain, any agent framework
-- It's robust — noise in individual episodes washes out; the trend is the truth
+**Key properties:**
 
-**Why this is agent-harness-agnostic:**
+1. **Single observable.** One metric across any task type, any domain, any agent framework. Noise in individual episodes washes out; the trend is the signal.
 
-The interface is just: **SSH into a box, read SKILL.md, do stuff.** Any agent framework works.
+2. **Agent-harness-agnostic.** The interface is: SSH into a sandbox, read SKILL.md, execute. The validator only sees cost per episode and PASS/FAIL.
 
-| Framework | How it consumes SKILL.md |
-|-----------|-------------------------|
-| Claude Code | Reads as `CLAUDE.md` |
-| Cursor | Reads as `.cursor/rules` |
-| OpenClaw | Reads as `AGENTS.md` |
-| Custom harness | `cat /workspace/SKILL.md` |
-| Raw LLM + bash | System prompt includes file |
+   | Framework | How it consumes SKILL.md |
+   |-----------|-------------------------|
+   | Claude Code | Reads as `CLAUDE.md` |
+   | Cursor | Reads as `.cursor/rules` |
+   | OpenClaw | Reads as `AGENTS.md` |
+   | Custom harness | `cat /workspace/SKILL.md` |
+   | Raw LLM + bash | System prompt includes file |
 
-The validator doesn't care which harness runs. It only sees: cost per episode, PASS/FAIL. This means miners compete on **which agent framework learns best** — not just which prompt is cleverest. A miner running Claude Code competes directly against a miner running a custom Python harness. Best learner wins.
+   Miners compete on which agent framework learns best, not which prompt is cleverest. A miner running Claude Code competes directly against a miner running a custom Python harness.
 
-**Why this is un-gameable:**
+3. **Resistant to gaming.** A single scenario result can be hacked. A consistent downward trend across N episodes cannot, because:
+   - Task order is **permuted** each epoch
+   - Episode count **varies** each epoch
+   - Data is **different** each episode
+   - Task types are **interleaved** (learning must transfer)
 
-A miner can hack a single scenario result. But they **cannot fake a consistent downward trend** across N episodes where:
-- Task order is **permuted** each epoch (can't predict what comes when)
-- Episode count **varies** each epoch (don't know when eval ends)
-- Data is **different** each episode (can't memorize answers)
-- Task types are **interleaved** (learning must transfer)
-
-The only way to produce a genuine downward cost curve is to genuinely learn. The curve doesn't lie.
+The only viable strategy is to build an agent that genuinely learns.
 
 ---
 
@@ -119,15 +113,15 @@ v1: Agent → OpenClaw API → mock handler → regex match → static fixture �
 v2: Agent → SSH/exec into Docker → real shell → real (mock) services → stateful environment
 ```
 
-### Why This Changes Everything
+### What Changes
 
-**The exec god-function dies.** The agent runs real commands in a real shell. `himalaya envelope list`, `curl localhost:1080/api/v2/messages`, `python3 -c "import imaplib; ..."` — all valid, all produce real results.
+**No exec god-function.** The agent runs real commands in a real shell. `himalaya envelope list`, `curl localhost:1080/api/v2/messages`, `python3 -c "import imaplib; ..."` — all valid, all produce real results.
 
-**Statefulness comes for free.** Agent sends email → it actually appears in the mock SMTP server's mailbox. Scoring becomes: inspect the final state of the environment.
+**Stateful by default.** Agent sends email → it appears in the mock SMTP server's mailbox. Scoring inspects the final state of the environment, not the commands used.
 
-**Memorization becomes nearly impossible.** Procedural fixture generation seeds different data each eval. Same structure, completely different content.
+**Procedural data.** Fixture generation seeds different data each eval. Same structure, completely different content. Memorization is no longer a viable strategy.
 
-**The narrow corridor opens wide.** Mock services respond to real protocols, not pattern-matched strings. Creative, efficient agents are rewarded instead of punished.
+**Protocol-level interface.** Mock services respond to real protocols, not pattern-matched strings. Agents are free to use any tool or method that speaks the protocol.
 
 ---
 
@@ -400,7 +394,7 @@ Learn fast AND be cheap overall = win.
    - Signal: cost curve across episodes
 ```
 
-That's it. **Pass the gate, show a downward cost curve.**
+**Gate:** all episodes must PASS. **Signal:** downward cost curve.
 
 ---
 
@@ -485,28 +479,24 @@ Between episodes, user corrections can be injected:
 }
 ```
 
-The cost curve tells the whole story.
+The cost curve is the complete evaluation output.
 
 ---
 
-## Why This Is Hard to Game
+## Anti-Gaming Analysis
 
-**The four walls of anti-gaming:**
-1. **Varying data** kills memorization
-2. **Permuted order** kills position-based optimization
-3. **Variable length** kills endpoint targeting
-4. **Cost curve normalization** kills artificial inflation
+Four mechanisms work together:
 
-A miner would need to simultaneously fake all four to game the system. The only viable strategy is to actually build a learning agent.
+| Mechanism | What it prevents |
+|-----------|-----------------|
+| Varying data (Tier 3 fixtures) | Memorization of specific answers |
+| Permuted episode order | Position-based optimization |
+| Variable episode count (N=8-16) | Endpoint targeting (inflate early, deflate late) |
+| Cost curve normalization (by thirds) | Artificial inflation of initial cost |
 
-**The miner's real challenge:** Author a SKILL.md that teaches the agent to:
-1. Reflect after each task
-2. Identify what worked and what didn't
-3. Store useful patterns (not raw data)
-4. Retrieve and apply patterns in new contexts
-5. All while minimizing token overhead
+A successful gaming strategy would need to defeat all four simultaneously.
 
-This is genuinely hard. It's agent engineering, not benchmark gaming.
+**What miners must actually build:** A SKILL.md that teaches the agent to reflect after each task, identify effective patterns, store them compactly, and retrieve them in new contexts — while minimizing token overhead. This is an agent engineering problem, not a benchmark optimization problem.
 
 ---
 
@@ -554,9 +544,9 @@ Gaming surface: memorize fixture data, reverse-engineer check types, hardcode sc
 
 Miners optimize for: "most capable self-learning agent that improves across diverse tasks in a real environment."
 
-Gaming surface: dramatically reduced — procedural data kills memorization, outcome-based scoring kills regex gaming, cost curve kills snapshot optimization, diverse scenarios kill over-specialization.
+Gaming surface: reduced — procedural data prevents memorization, outcome-based scoring prevents regex gaming, cost curve prevents snapshot optimization, diverse scenarios prevent over-specialization.
 
-The miner population separates into **genuinely capable agent builders** vs. **memorization optimizers** — and the latter are structurally eliminated.
+The evaluation structurally selects for agent engineering capability over benchmark optimization.
 
 ---
 
