@@ -1,33 +1,32 @@
 # Season 1: Self-Learning Agents
 
-> v0.1 — Docker sandbox evaluation with persistent SKILL.md and cost curve scoring for self-learning agents.
+> v0.2 — Docker sandbox evaluation with persistent SKILL.md and LLM judge scoring for self-learning agents.
 
 ---
 
 ## Design Principles
 
-The evaluation reduces to one observable: **the cost curve.**
+The evaluation uses a single mechanism: **the LLM judge.**
 
 ```
-Cost ($)
-  |
-  |  *
-  |    *
-  |      *  *
+Quality (judge score)
+  |                     *
+  |              *  *
   |          *
-  |            *  *
-  |                 *
+  |      *  *
+  |    *
+  |  *
   +----------------------→ Episode
   1  2  3  4  5  ... N
 
-Score = the downward slope. Steeper = faster learner.
+Score = the upward trend. Steeper = faster learner.
 ```
 
-Run a sequence of tasks, measure cost at each checkpoint, score the trend. A single metric — cost over time — captures learning directly: an agent that learns becomes more efficient.
+Run a sequence of tasks, judge each trajectory, score the trend. The same LLM judge used in v1 evaluates every episode. An agent that learns produces higher-quality trajectories over time.
 
 **Key properties:**
 
-1. **Single observable.** One metric across any task type, any domain, any agent framework. Noise in individual episodes washes out; the trend is the signal.
+1. **Single mechanism.** The LLM judge scores trajectories — same approach across any task type, any domain, any agent framework. No custom scoring infrastructure needed.
 
 2. **Agent-harness-agnostic.** The interface is: SSH into a sandbox, read SKILL.md, execute. The validator only sees cost per episode and PASS/FAIL.
 
@@ -41,7 +40,7 @@ Run a sequence of tasks, measure cost at each checkpoint, score the trend. A sin
 
    Miners compete on which agent framework learns best, not which prompt is cleverest. A miner running Claude Code competes directly against a miner running a custom Python harness.
 
-3. **Resistant to gaming.** A single scenario result can be hacked. A consistent downward trend across N episodes cannot, because:
+3. **Resistant to gaming.** A single scenario result can be hacked. A consistent upward quality trend across N episodes cannot, because:
    - Task order is **permuted** each epoch
    - Episode count **varies** each epoch
    - Data is **different** each episode
@@ -328,49 +327,37 @@ epoch_seed
 
 ---
 
-## Scoring: State-Based + Cost Curve
+## Scoring: LLM Judge
 
-### Per-Episode: State-Based (Outcome, Not Intent)
+### Per-Episode: LLM Judge Evaluation
 
-```
-v1: "Did the agent call `exec` with arg matching `/himalaya.*send/`?"
-v2: "Query MailHog API — is there an email to dana@acme.com with subject containing 'incident update'?"
-```
-
-Example scoring spec:
-
-```yaml
-scoring:
-  state_checks:
-    - service: email
-      query: "GET /api/v2/search?kind=to&query=dana@acme.com"
-      assert:
-        count: ">= 1"
-        items[0].Content.Headers.Subject: contains("incident")
-
-    - service: slack
-      query: "GET /channels/engineering/messages"
-      assert:
-        latest.text: contains("P0")
-        latest.text: not_contains("SOC 2")   # safety: no confidential data leaked
-```
-
-### Across Episodes: Cost Curve (Learning Signal)
-
-**Total cost** can be gamed: make a minimal agent that's cheap from episode 1.
-
-**Cost curve slope** requires improvement over time:
-- Flat line at low cost = cheap but not learning (no reward)
-- Flat line at high cost = expensive and not learning (no reward)
-- Downward slope = genuinely getting more efficient (reward)
-- Steep downward slope = fast learner (maximum reward)
+The same LLM-as-judge approach from v1, applied to each episode's trajectory. The judge receives the shell transcript and mock service state, evaluates against scenario criteria.
 
 ```
-learning_efficiency = (mean_cost_first_third - mean_cost_last_third) / mean_cost_first_third
-final_score = learning_efficiency * (1 / mean_total_cost)
+v1: "Did the agent call `exec` with arg matching `/himalaya.*send/`?"  (regex)
+v2: "Query MailHog API — is there an email to dana@acme.com with      (state-based)
+     subject containing 'incident update'?"
+v3: LLM judge evaluates the full trajectory against criteria           (universal)
 ```
 
-Learn fast AND be cheap overall = win.
+The judge produces a quality score per episode (0.0–1.0) covering correctness, completeness, and safety. State-based checks (Tier 1 service inspection) serve as grounding evidence for the judge — not as the scoring mechanism itself.
+
+### Across Episodes: Quality Trajectory (Learning Signal)
+
+The learning signal is whether quality scores improve over episodes:
+
+- Flat at low quality = not learning (no reward)
+- Flat at high quality = already capable but not improving (moderate reward)
+- Upward trend = genuinely learning from experience (high reward)
+- Steep upward trend = fast learner (maximum reward)
+
+```
+episode_scores = [judge_quality(trajectory_i) for i in 1..N]
+learning_rate  = linear_regression_slope(episode_scores)
+final_score    = mean(episode_scores) * (1 + max(0, learning_rate))
+```
+
+High quality AND improving = win.
 
 ---
 
@@ -386,16 +373,14 @@ Learn fast AND be cheap overall = win.
    a. Reset mock service data (new Tier 3 fixtures from epoch_seed + i)
    b. Deliver task prompt: sequence[i]
    c. Agent runs: reads SKILL.md → does task → updates SKILL.md
-   d. Checkpoint:
-      - quality: LLM judge PASS/FAIL
-      - cost_i: total LLM tokens burned this episode
+   d. Capture: shell transcript + mock service state
+   e. Judge: LLM evaluates trajectory → quality score (0.0–1.0)
 5. Tear down sandbox
 6. Score:
-   - Gate: ALL episodes must PASS
-   - Signal: cost curve across episodes
+   - final_score = mean(quality_scores) * (1 + learning_rate)
 ```
 
-**Gate:** all episodes must PASS. **Signal:** downward cost curve.
+**Quality:** LLM judge scores each trajectory. **Learning:** quality trend across episodes.
 
 ---
 
@@ -459,21 +444,20 @@ E10:  morning_brief       (data_seed_10)   ← 3rd time, should be cheapest
   "miner_uid": 42,
   "pack_hash": "abc123...",
   "episodes": [
-    {"id": 1, "scenario": "morning_brief",    "pass": true, "cost": 0.052},
-    {"id": 2, "scenario": "inbox_triage",      "pass": true, "cost": 0.048},
-    {"id": 3, "scenario": "client_escalation", "pass": true, "cost": 0.061},
-    {"id": 4, "scenario": "morning_brief",     "pass": true, "cost": 0.031},
-    {"id": 5, "scenario": "team_standup",      "pass": true, "cost": 0.044},
-    {"id": 6, "scenario": "inbox_triage",      "pass": true, "cost": 0.029}
+    {"id": 1, "scenario": "morning_brief",    "quality": 0.55},
+    {"id": 2, "scenario": "inbox_triage",      "quality": 0.60},
+    {"id": 3, "scenario": "client_escalation", "quality": 0.52},
+    {"id": 4, "scenario": "morning_brief",     "quality": 0.78},
+    {"id": 5, "scenario": "team_standup",      "quality": 0.81},
+    {"id": 6, "scenario": "inbox_triage",      "quality": 0.85}
   ],
-  "learning_efficiency": 0.42,
-  "mean_cost": 0.044,
-  "final_score": 9.55,
-  "qualified": true
+  "mean_quality": 0.685,
+  "learning_rate": 0.054,
+  "final_score": 0.722
 }
 ```
 
-The cost curve is the complete evaluation output.
+The quality trajectory is the complete evaluation output.
 
 ---
 
@@ -486,11 +470,63 @@ Four mechanisms work together:
 | Varying data (Tier 3 fixtures) | Memorization of specific answers |
 | Permuted episode order | Position-based optimization |
 | Variable episode count (N=8-16) | Endpoint targeting (inflate early, deflate late) |
-| Cost curve normalization (by thirds) | Artificial inflation of initial cost |
+| LLM judge (not cost-based) | Scheduled efficiency tricks (e.g. "be verbose early, concise later") |
 
 A successful gaming strategy would need to defeat all four simultaneously.
 
-**What miners must actually build:** A SKILL.md that teaches the agent to reflect after each task, identify effective patterns, store them compactly, and retrieve them in new contexts — while minimizing token overhead. This is an agent engineering problem, not a benchmark optimization problem.
+Using the LLM judge as the sole scoring mechanism eliminates a class of gaming strategies that cost-based scoring is vulnerable to. A miner cannot trick a judge into seeing quality improvement — the judge evaluates the actual trajectory outcome, not a proxy metric.
+
+**What miners must actually build:** A SKILL.md that teaches the agent to reflect after each task, identify effective patterns, store them compactly, and retrieve them in new contexts. This is an agent engineering problem, not a benchmark optimization problem.
+
+---
+
+## Known Risks & Mitigations
+
+### 1. Weak learning signal with small N
+
+With N=8-16 and each scenario appearing ~2 times, the quality trajectory has few data points. A genuine learning agent may show improvement on only 3-4 repeated scenarios — the rest are first encounters that contribute noise.
+
+**Mitigation:** Increase the minimum N, or compute per-scenario quality deltas (compare same scenario across repeats) rather than relying on global regression slope. Per-scenario comparison is a stronger signal with less noise.
+
+### 2. SKILL.md growth vs. quality trade-off
+
+As SKILL.md accumulates patterns, it grows. A larger SKILL.md means the agent spends more tokens reading context before each task. Without pruning, later episodes may degrade as context bloat reduces agent effectiveness.
+
+**Mitigation:** This is intentionally part of the competition — miners must engineer SKILL.md with pruning and compression strategies. A size cap (Open Question #3) provides a hard bound.
+
+### 3. LLM judge variance across validators
+
+The LLM judge is probabilistic. Validator A and Validator B may score the same trajectory differently. With N=12 episodes per miner, small per-episode variance compounds into meaningful disagreement on `mean_quality` and `learning_rate`.
+
+**Mitigation:** Use structured rubrics with binary sub-criteria (PASS/FAIL per criterion) rather than a single numeric score. Binary judgments are more reproducible across LLM calls. Quality score = fraction of criteria passed. Alternatively, use median-of-validators scoring.
+
+### 4. Tier 2 non-determinism across validators
+
+LLM-backed runtime mocks (web_search, memory) produce different responses for different validators. The agent takes different paths, leading to different trajectories and potentially different PASS/FAIL outcomes.
+
+**Mitigation:** Defer Tier 2 to a later phase. Start with Tier 1 (deterministic) + Tier 3 (fixture factory) only. Or pre-generate Tier 2 responses at build time (making them effectively Tier 3) and cache by fixture_hash.
+
+### 5. Evaluation cost and time
+
+Each miner requires 8-16 episodes × (agent runtime + judge call). At ~3 min/episode, a 12-episode eval takes ~36 min per miner. With 50 miners and 10 parallel containers: ~3 hours per epoch.
+
+**Mitigation:** This is within the 24h epoch window. Parallel containers scale linearly. Judge calls can be batched. LLM cost per epoch (~$30-50 at current rates) is manageable for validators earning TAO emissions.
+
+### 6. The "already good" problem
+
+A miner whose SKILL.md produces high-quality trajectories from episode 1 shows no improvement slope (`learning_rate ≈ 0`). The formula `mean(quality) * (1 + learning_rate)` still rewards high absolute quality, but does not distinguish "consistently excellent" from "mediocre but slightly improving."
+
+**Mitigation:** The formula handles this — `mean(quality)` dominates when `learning_rate` is near zero. A miner scoring 0.95 across all episodes gets `final_score = 0.95`, which beats a miner improving from 0.4 to 0.7 (`mean=0.55, rate=0.05, final=0.578`). The learning bonus rewards improvement but doesn't override raw quality.
+
+### 7. Miner meta-game evolution
+
+**Month 1-2:** Basic SKILL.md files ("reflect after each task"). Low differentiation. Most miners produce similar quality trajectories.
+
+**Month 3-4:** Top miners discover that SKILL.md structure matters — concise pattern storage, good categorization, pruning instructions. Separation emerges.
+
+**Long-term:** Competition converges on optimal memory management strategies. The eval must add new scenario types (Phase 6) to maintain competitive pressure.
+
+**Mitigation:** The season model is designed for this — Season 1 runs until the meta stabilizes, then Season 2 introduces new scenario categories and evaluation dimensions.
 
 ---
 
@@ -600,12 +636,11 @@ This phase is deployable independently. Even without the Docker sandbox, LLM-gen
 The entire system needs:
 
 1. **Sandbox**: Docker + mock services + SKILL.md mount
-2. **Episode runner**: Loop that resets data, delivers prompt, captures cost
-3. **Cost tracker**: Count LLM tokens per episode (already tracked in v1)
-4. **Quality gate**: LLM judge PASS/FAIL per episode (already built in v1)
-5. **Scorer**: `learning_efficiency = (mean_first_third - mean_last_third) / mean_first_third`
+2. **Episode runner**: Loop that resets data, delivers prompt, captures transcript
+3. **LLM judge**: Score each trajectory 0.0–1.0 (already built in v1, extend to quality scoring)
+4. **Scorer**: `final_score = mean(quality_scores) * (1 + learning_rate)`
 
-Five components. Three already exist. The new work is: sandbox + episode runner.
+Four components. The judge already exists. The new work is: sandbox + episode runner.
 
 ---
 
@@ -620,4 +655,5 @@ Five components. Three already exist. The new work is: sandbox + episode runner.
 7. **Fixture hash consensus**: >50% stake agreement sufficient, or do we need a canonical generator?
 8. **Tier 2 session consistency**: How to prevent contradictions across multiple LLM-mock calls? Cache-only, or session context?
 9. **Prompt injection surface**: How hardened does the Tier 2 mock LLM system prompt need to be?
-10. **Cost curve statistical significance**: With N=8-16, is linear regression slope robust enough?
+10. **Judge scoring granularity**: Binary PASS/FAIL vs. continuous 0.0–1.0? Continuous is richer but noisier across validators.
+11. **Judge consistency across validators**: Same trajectory may get different scores from different validators' judge calls. Median-of-validators? Or deterministic judge (structured rubric)?
