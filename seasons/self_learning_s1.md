@@ -263,6 +263,32 @@ All services are deterministic. All data is pre-generated before the episode sta
 **Stateful services** accept mutations — scoring inspects final state.
 **Read-only services** return pre-generated fixtures — scoring evaluates what the agent did with the information.
 
+### Read-Only Services: File-Based Mocks
+
+Web search, web fetch, and memory are served as static fixture files by lightweight HTTP endpoints:
+
+```
+/fixtures/web_search/results.json    → keyed by topic/keyword
+/fixtures/web_pages/                 → full page content (markdown/HTML)
+/fixtures/memory/entries.json        → keyed by query pattern
+```
+
+```
+Agent: curl localhost:8083/search?q=notion+batch+operations
+  → Mock service matches keywords against results.json
+  → Returns pre-generated search results
+
+Agent: curl localhost:8083/fetch?url=https://docs.notion.so/api
+  → Mock service returns matching page from /fixtures/web_pages/
+  → Returns pre-generated page content
+
+Agent: curl localhost:8084/memory?q=meeting+notes+dana
+  → Mock service matches against entries.json
+  → Returns pre-generated memory entries
+```
+
+The fixture factory generates these alongside email/tasks/calendar data — same `epoch_seed`, same generation flow, same `fixture_hash`. The search fixtures cover the relevant information space for each scenario. Queries that don't match any fixture return an empty result set.
+
 ### Fixture Factory
 
 Replace hand-crafted fixture JSON with LLM-generated fixtures from scenario templates:
