@@ -139,17 +139,12 @@ Any method that speaks the protocol works: `curl localhost:1080/api/v2/messages`
 
 ```
 Docker Container ("eval sandbox")
-├── Tier 1: Deterministic Mock Services (stateful, standard protocols)
+├── Mock Services (stateful, standard protocols — all deterministic)
 │   ├── MailHog/MailPit       (SMTP :1025, HTTP API :1080) — email
 │   ├── Mock Notion API       (HTTP :8080) — tasks / databases
 │   ├── Mock Calendar API     (CalDAV :5232 or HTTP :8081)
 │   ├── Mock Slack API        (HTTP :8082) — channels, messages
 │   └── Gitea                 (HTTP :3000, git SSH :2222) — repos, PRs, issues
-│
-├── Tier 2: LLM-Backed Runtime Mocks (read-only, on-the-fly generation)
-│   ├── Web search/fetch proxy (HTTP :8083) — LLM generates search results & pages
-│   └── Memory service         (HTTP :8084) — LLM generates memory entries
-│   (Requires outbound access to LLM API only — all other egress blocked)
 │
 ├── Standard Tools (pre-installed, all optional — agent can use any method)
 │   ├── curl, jq, python3, git, node, gh — universal
@@ -161,14 +156,15 @@ Docker Container ("eval sandbox")
 │   ├── /workspace/...         (pack files)
 │   └── /workspace/docs/       (scenario-specific reference docs)
 │
-├── Seed Data (LLM-generated from scenario template + epoch_seed, Tier 3)
+├── Seed Data (LLM-generated from scenario template + epoch_seed)
 │   ├── Pre-loaded emails in MailHog
 │   ├── Pre-loaded tasks in mock Notion
 │   ├── Pre-loaded calendar events
-│   └── Pre-loaded Slack channel history
+│   ├── Pre-loaded Slack channel history
+│   └── Pre-loaded web search results + memory entries (static fixtures)
 │
 └── Security
-    ├── Network: egress blocked EXCEPT validator's LLM API (for Tier 2 mocks)
+    ├── Network: all egress blocked (fully offline sandbox)
     ├── CPU / memory / disk limits
     └── Hard timeout per episode
 ```
@@ -194,7 +190,7 @@ Container lifecycle:
 Between episodes:
   1. Capture: shell transcript, cost, service state
   2. Score: LLM judge → quality score (0.0–1.0)
-  3. Reset: reload Tier 1 services with new fixtures
+  3. Reset: reload mock services with new fixtures
   4. Preserve: /workspace/SKILL.md, /workspace/learned/
   5. Start next episode
 ```
@@ -232,64 +228,42 @@ The miner authors the initial `Instructions` section. The `Learned Patterns` and
 
 ---
 
-## LLM-Hybrid Mock Strategy
+## Mock Strategy
 
-### The Three-Tier Architecture
-
-```
-Tier 1: Deterministic Mock Services (stateful, scoring inspects state)
-        → Email (MailHog/MailPit), Tasks, Calendar, Slack, GitHub/Gitea
-        → Agent mutations are real, state is inspectable after episode
-        → Seed data: LLM-generated (Tier 3), loaded before episode
-
-Tier 2: LLM-Backed Runtime Mocks (read-only, scoring checks outcomes)
-        → web_search, web_fetch, memory_search
-        → LLM generates realistic responses on the fly during episode
-        → No state to inspect — scoring evaluates agent's final output
-
-Tier 3: LLM Fixture Factory (build-time generation)
-        → Generates all seed data for Tier 1 services
-        → Replaces hand-crafted JSON fixture files
-        → Deterministic distribution via hash consensus
-```
-
-### Why Three Tiers?
-
-| Service | Mutations? | Scoring Method | Tier |
-|---------|-----------|----------------|------|
-| Email | Yes (send, delete, move) | State inspection: "is there an email to Dana?" | 1 |
-| Tasks/Notion | Yes (create, update, close) | State inspection: "are there 3 new tasks?" | 1 |
-| Calendar | Yes (create, delete events) | State inspection: "is the conflict resolved?" | 1 |
-| Slack | Yes (send messages, react) | State inspection: "was P0 posted to #engineering?" | 1 |
-| GitHub/Gitea | Yes (commits, PRs, issues) | State inspection: "do tests pass? Is PR merged?" | 1 |
-| Web search | No (read-only) | Response quality: "did agent find the right info?" | 2 |
-| Web fetch | No (read-only) | Response quality: "did agent use page content?" | 2 |
-| Memory | No (read-only) | Response quality: "did agent leverage past context?" | 2 |
-| Filesystem | Yes (create, edit files) | File diff: deterministic | 1 |
-
-**Stateful services where scoring inspects state → deterministic mock (Tier 1).**
-**Read-only information services where scoring checks agent output → LLM-backed (Tier 2).**
-
-### Tier 2: LLM-Backed Runtime Mocks
-
-During an episode, the agent can freely query web/memory tools. Instead of matching against fixture files, an LLM generates realistic responses:
+### Two-Tier Architecture
 
 ```
-Agent: web_search("notion API batch operations")
-  → Sandbox web service intercepts
-  → LLM generates 5 realistic search results
-  → Returns to agent
+Mock Services (stateful, scoring inspects state)
+  → Email (MailHog/MailPit), Tasks, Calendar, Slack, GitHub/Gitea
+  → Web search, web fetch, memory (read-only, pre-generated fixtures)
+  → Agent mutations are real, state is inspectable after episode
 
-Agent: memory_search("previous meeting notes with Dana")
-  → LLM generates relevant memory entries consistent with scenario context
-  → Returns to agent
+Fixture Factory (build-time generation)
+  → Generates ALL seed data — stateful services AND read-only fixtures
+  → Replaces hand-crafted JSON fixture files
+  → Deterministic distribution via hash consensus
 ```
 
-**What this unlocks:** agent can search for *anything*, no fixture files to maintain, results are contextually appropriate, new scenarios don't need new web fixtures.
+All services are deterministic. All data is pre-generated before the episode starts. No LLM calls during episode runtime. No egress from the sandbox.
 
-**Anti-gaming:** The mock LLM has a hard system prompt constraining it to generate realistic service responses, not direct answers. It never sees scoring criteria or scenario requirements.
+### Service Table
 
-### Tier 3: LLM Fixture Factory
+| Service | Mutations? | Scoring Method |
+|---------|-----------|----------------|
+| Email | Yes (send, delete, move) | State inspection: "is there an email to Dana?" |
+| Tasks/Notion | Yes (create, update, close) | State inspection: "are there 3 new tasks?" |
+| Calendar | Yes (create, delete events) | State inspection: "is the conflict resolved?" |
+| Slack | Yes (send messages, react) | State inspection: "was P0 posted to #engineering?" |
+| GitHub/Gitea | Yes (commits, PRs, issues) | State inspection: "do tests pass? Is PR merged?" |
+| Web search | No (read-only, fixture) | Response quality: "did agent use relevant results?" |
+| Web fetch | No (read-only, fixture) | Response quality: "did agent use page content?" |
+| Memory | No (read-only, fixture) | Response quality: "did agent leverage past context?" |
+| Filesystem | Yes (create, edit files) | File diff: deterministic |
+
+**Stateful services** accept mutations — scoring inspects final state.
+**Read-only services** return pre-generated fixtures — scoring evaluates what the agent did with the information.
+
+### Fixture Factory
 
 Replace hand-crafted fixture JSON with LLM-generated fixtures from scenario templates:
 
@@ -319,7 +293,7 @@ epoch_seed
   → LLM generates content within those constraints
   → Output validated against JSON schema
   → Cached by hash(epoch_seed + scenario_id + template_version)
-  → Loaded into Tier 1 mock services at container start
+  → Loaded into mock services at container start
 ```
 
 **Scenario authoring becomes:**
@@ -353,7 +327,7 @@ v2: "Query MailHog API — is there an email to dana@acme.com with      (state-b
 v3: LLM judge evaluates the full trajectory against criteria           (universal)
 ```
 
-The judge produces a quality score per episode (0.0–1.0) covering correctness, completeness, and safety. State-based checks (Tier 1 service inspection) serve as grounding evidence for the judge — not as the scoring mechanism itself.
+The judge produces a quality score per episode (0.0–1.0) covering correctness, completeness, and safety. State-based checks (mock service inspection) serve as grounding evidence for the judge — not as the scoring mechanism itself.
 
 ### Across Episodes: Quality Trajectory (Learning Signal)
 
@@ -390,7 +364,7 @@ Per-scenario regression over 4-8 repetitions. High quality AND improving = win.
    - N = rng.randint(8, 16)                        ← variable length
    - sequence = interleave(2 scenarios, N)          ← 4-8 reps each
 4. For episode i = 1..N:
-   a. Reset mock service data (new Tier 3 fixtures from epoch_seed + i)
+   a. Reset mock service data (new fixtures from epoch_seed + i)
    b. Deliver task prompt: sequence[i]
    c. Agent runs: reads SKILL.md → does task → updates SKILL.md
    d. Capture: shell transcript + mock service state
@@ -503,7 +477,7 @@ Four mechanisms work together:
 
 | Mechanism | What it prevents |
 |-----------|-----------------|
-| Varying data (Tier 3 fixtures) | Memorization of specific answers |
+| Varying data (generated fixtures) | Memorization of specific answers |
 | Per-scenario regression (4-8 reps) | Noise-based gaming (too few data points to fake a trend) |
 | Variable episode count (N=8-16) | Endpoint targeting (inflate early, deflate late) |
 | LLM judge (not cost-based) | Scheduled efficiency tricks (e.g. "be verbose early, concise later") |
@@ -524,13 +498,13 @@ These parts of the design solve real v1 problems regardless of how scoring evolv
 
 2. **SKILL.md as pack format.** A plain markdown file any framework can read. No protocol, no API, no framework lock-in. The abstraction is minimal and correct.
 
-3. **Procedural data generation (Tier 3).** LLM-generated fixtures from seed + template eliminates memorization and removes the fixture maintenance burden. Deployable independently — even without the sandbox, this improves v1.
+3. **Procedural data generation (Fixture Factory).** LLM-generated fixtures from seed + template eliminates memorization and removes the fixture maintenance burden. Deployable independently — even without the sandbox, this improves v1.
 
 4. **State-based scoring evidence.** Checking MailHog API for "is there an email to Dana?" instead of regex-matching `himalaya send` is a qualitative leap. Agents are free to use any tool or method. The scoring sees outcomes, not commands.
 
 5. **LLM judge as universal scorer.** Already proven in v1. Extending it to continuous quality scoring (0.0–1.0) is incremental, not architectural. No separate gate mechanism — low quality episodes simply score low. The judge is the one component that doesn't need to be built from scratch.
 
-The primary unknowns are in the **multi-episode learning signal** (how to reliably measure improvement with small N) and **cross-validator determinism** (Tier 2 mocks, judge variance). These are addressed in the risks section below.
+The primary unknowns are in the **multi-episode learning signal** (how to reliably measure improvement with small N) and **cross-validator determinism** (judge variance). These are addressed in the risks section below.
 
 ---
 
@@ -554,25 +528,19 @@ The LLM judge is probabilistic. Validator A and Validator B may score the same t
 
 **Mitigation:** Use structured rubrics with binary sub-criteria per dimension (e.g., correctness, completeness, safety) rather than a single numeric score. Binary judgments are more reproducible across LLM calls. Quality score = fraction of criteria passed. Alternatively, use median-of-validators scoring.
 
-### 4. Tier 2 non-determinism across validators
-
-LLM-backed runtime mocks (web_search, memory) produce different responses for different validators. The agent takes different paths, leading to different trajectories and potentially different quality scores.
-
-**Mitigation:** Defer Tier 2 to a later phase. Start with Tier 1 (deterministic) + Tier 3 (fixture factory) only. Or pre-generate Tier 2 responses at build time (making them effectively Tier 3) and cache by fixture_hash.
-
-### 5. Evaluation cost and time
+### 4. Evaluation cost and time
 
 Each miner requires 8-16 episodes × (agent runtime + judge call). At ~3 min/episode, a 12-episode eval takes ~36 min per miner. With 50 miners and 10 parallel containers: ~3 hours per epoch.
 
 **Mitigation:** This is within the 24h epoch window. Parallel containers scale linearly. Judge calls can be batched. LLM cost per epoch (~$30-50 at current rates) is manageable for validators earning TAO emissions.
 
-### 6. The "already good" problem
+### 5. The "already good" problem
 
 A miner whose SKILL.md produces high-quality trajectories from episode 1 shows no improvement slope (`learning_rate ≈ 0`). The formula `mean(quality) * (1 + learning_rate)` still rewards high absolute quality, but does not distinguish "consistently excellent" from "mediocre but slightly improving."
 
 **Mitigation:** The formula handles this — `mean(quality)` dominates when `learning_rate` is near zero. A miner scoring 0.95 across all episodes gets `final_score = 0.95`, which beats a miner improving from 0.4 to 0.7 (`mean=0.55, rate=0.05, final=0.578`). The learning bonus rewards improvement but doesn't override raw quality.
 
-### 7. Miner meta-game evolution
+### 6. Miner meta-game evolution
 
 **Month 1-2:** Basic SKILL.md files ("reflect after each task"). Low differentiation. Most miners produce similar quality trajectories.
 
@@ -596,7 +564,7 @@ P0 bug report from a client. Agent must triage emails, check GitHub for the rele
 
 ### Scenario B: Code Bug Fix (Technical)
 
-Git repo seeded with a bug. Agent must read the issue, find the bug, write a fix, run tests, commit. Different bug type and codebase each attempt (procedural generation via Tier 3).
+Git repo seeded with a bug. Agent must read the issue, find the bug, write a fix, run tests, commit. Different bug type and codebase each attempt (procedural generation via fixture factory).
 
 **Why it's deep:** Requires reading code, reasoning about the bug, writing a correct fix, running tests. Many sub-skills to learn (read tests first, check error messages, verify fix doesn't break other tests, keep diff minimal).
 
@@ -630,9 +598,10 @@ The evaluation structurally selects for agent engineering capability over benchm
 
 ## Migration Path
 
-### Phase 1: LLM Fixture Factory (Tier 3) — Lowest risk, highest immediate value
+### Phase 1: Fixture Factory — Lowest risk, highest immediate value
 
 - Build fixture generation prompts + JSON schemas for existing scenarios
+- Include web search results + memory entries in generated fixtures
 - Implement PRNG-based structural param derivation from `epoch_seed`
 - Implement fixture_hash consensus mechanism
 - **Test:** Generate fixtures for client_escalation, compare quality to hand-crafted
@@ -640,22 +609,15 @@ The evaluation structurally selects for agent engineering capability over benchm
 
 This phase is deployable independently. Even without the Docker sandbox, LLM-generated fixtures eliminate memorization and remove the fixture maintenance burden.
 
-### Phase 2: Sandbox Infrastructure (Tier 1)
+### Phase 2: Sandbox Infrastructure
 
-- Build base Docker image with MailHog + lightweight mock APIs (Notion, Calendar, Slack)
-- Load Tier 3 fixtures into mock services at container start
+- Build base Docker image with MailHog + lightweight mock APIs (Notion, Calendar, Slack, web, memory)
+- Load fixtures into mock services at container start
 - Implement observation capture (transcript + service logs + fs diff)
 - Port client_escalation and code_bug_fix to sandbox format
 - **Test:** Run side-by-side with v1, compare scoring agreement
 
-### Phase 3: LLM Runtime Mocks (Tier 2)
-
-- Build web search/fetch proxy with LLM backend
-- Build memory service with LLM backend + session cache
-- Harden system prompts against prompt injection
-- **Test:** Measure mock quality, latency, cost per episode
-
-### Phase 4: Multi-Episode + SKILL.md
+### Phase 3: Multi-Episode + SKILL.md
 
 - Implement episode runner with persistent workspace
 - Implement per-scenario quality curve scoring
@@ -663,16 +625,16 @@ This phase is deployable independently. Even without the Docker sandbox, LLM-gen
 - Port AGENTS.md → SKILL.md format
 - **Test:** Run 10-episode sequences (5 reps × 2 scenarios), verify learning curves
 
-### Phase 5: Scoring Rewrite
+### Phase 4: Scoring Rewrite
 
-- Replace regex check types with state-based assertions (Tier 1 services)
+- Replace regex check types with state-based assertions (mock services)
 - Update LLM judge to consume shell transcripts + service state
 - Define scoring spec YAML format for state checks
 
-### Phase 6: Season 2 Preparation
+### Phase 5: Season 2 Preparation
 
 - Add new scenario types (data analysis, customer support, multi-step workflows)
-- Add error simulation (configure Tier 1 services to fail intermittently)
+- Add error simulation (configure mock services to fail intermittently)
 - Deprecate old fixture-based mock tools
 - Update miner SDK/docs for new environment
 
@@ -698,9 +660,6 @@ Four components. The judge already exists. The new work is: sandbox + episode ru
 3. **SKILL.md size limit**: Cap to prevent unbounded growth? 500 lines? 10KB?
 4. **Cross-epoch learning**: Should SKILL.md persist across epochs (24h), or reset each epoch?
 5. **Harness specification**: How does the validator know which agent harness to run? Miner specifies in pack metadata?
-6. **Tier 2 LLM model choice**: Same model as the judge? Smaller/cheaper?
-7. **Fixture hash consensus**: >50% stake agreement sufficient, or do we need a canonical generator?
-8. **Tier 2 session consistency**: How to prevent contradictions across multiple LLM-mock calls? Cache-only, or session context?
-9. **Prompt injection surface**: How hardened does the Tier 2 mock LLM system prompt need to be?
-10. **Judge scoring rubric**: How many sub-criteria per scenario? More criteria = finer signal but higher judge cost. Structured rubric (binary per criterion) vs. holistic numeric score?
-11. **Judge consistency across validators**: Same trajectory may get different scores from different validators' judge calls. Median-of-validators? Or deterministic judge (structured rubric)?
+6. **Fixture hash consensus**: >50% stake agreement sufficient, or do we need a canonical generator?
+7. **Judge scoring rubric**: How many sub-criteria per scenario? More criteria = finer signal but higher judge cost. Structured rubric (binary per criterion) vs. holistic numeric score?
+8. **Judge consistency across validators**: Same trajectory may get different scores from different validators' judge calls. Median-of-validators? Or deterministic judge (structured rubric)?
