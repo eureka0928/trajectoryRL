@@ -1,6 +1,6 @@
 # Season 1: Self-Learning Agents
 
-> v0.3 — Docker sandbox, hybrid grading (automated checks + LLM judge), two deep scenarios with atomic criteria.
+> v0.4 — Fixed N=4 episodes, delta-based learning signal, hybrid grading, two deep scenarios with atomic criteria.
 
 ---
 
@@ -40,10 +40,10 @@ Run a sequence of tasks, judge each trajectory, score the trend. The same LLM ju
 
    Miners compete on which agent framework learns best, not which prompt is cleverest. A miner running Claude Code competes directly against a miner running a custom Python harness.
 
-3. **Resistant to gaming.** A single scenario result can be hacked. A consistent upward quality trend across 4-8 repetitions of the same scenario cannot, because:
-   - Episode count **varies** each epoch (N=8-16)
+3. **Resistant to gaming.** A single scenario result can be hacked. A quality improvement across 2 repetitions of the same scenario with different data is harder to fake, because:
    - Data is **different** each attempt (same template, new content)
    - Two scenario domains prevent single-task overfitting
+   - Hybrid grading (automated + LLM judge) prevents hallucinated quality
 
 The only viable strategy is to build an agent that genuinely learns.
 
@@ -397,29 +397,30 @@ v3: LLM judge evaluates the full trajectory against criteria           (universa
 
 The judge produces a quality score per episode (0.0–1.0) covering correctness, completeness, and safety. State-based checks (mock service inspection) serve as grounding evidence for the judge — not as the scoring mechanism itself.
 
-### Across Episodes: Quality Trajectory (Learning Signal)
+### Across Episodes: Learning Signal (Delta)
 
-The learning signal is whether quality scores improve over episodes:
+The learning signal is whether quality improves from rep 1 to rep 2:
 
-- Flat at low quality = not learning (low score)
-- Flat at high quality = already capable, not improving (high score, no learning bonus)
-- Upward trend = learning from experience (high score + learning bonus)
-- Steep upward trend = fast learner (maximum score)
+- Both reps low = not capable (low score)
+- Both reps high = already capable, no improvement needed (high score, no learning bonus)
+- Rep 2 > Rep 1 = learning from experience (high score + learning bonus)
+- Rep 2 < Rep 1 = degraded (negative delta, penalized)
 
 No separate gate. A bad episode scores low (e.g. 0.1) and drags down `mean(quality)`. The formula handles it naturally — no binary disqualification needed.
 
 ```
-# Per-scenario learning curves (4-8 data points each — statistically meaningful)
+# Per-scenario delta (rep2 - rep1)
 for scenario in scenarios:
-    scores = [judge_quality(ep) for ep in episodes if ep.scenario == scenario]
-    learning_rate[scenario] = linear_regression_slope(scores)
+    rep1 = judge_quality(episodes[scenario][0])
+    rep2 = judge_quality(episodes[scenario][1])
+    delta[scenario] = rep2 - rep1
 
-overall_learning = mean(learning_rate.values())
-overall_quality  = mean(all_episode_scores)
-final_score      = overall_quality * (1 + max(0, overall_learning))
+mean_delta   = mean(delta.values())
+mean_quality = mean(all_episode_scores)
+final_score  = mean_quality * (1 + max(0, mean_delta))
 ```
 
-Per-scenario regression over 4-8 repetitions. High quality AND improving = win.
+Simple delta per scenario. High quality AND improving = win.
 
 ---
 
@@ -428,10 +429,8 @@ Per-scenario regression over 4-8 repetitions. High quality AND improving = win.
 ```
 1. Build sandbox (mock services + CLI tools)
 2. Load miner's SKILL.md into /workspace/
-3. Derive sequence from epoch_seed:
-   - N = rng.randint(8, 16)                        ← variable length
-   - sequence = interleave(2 scenarios, N)          ← 4-8 reps each
-4. For episode i = 1..N:
+3. Fixed sequence: A → B → A → B (2 scenarios × 2 reps each)
+4. For episode i = 1..4:
    a. Reset mock service data (new fixtures from epoch_seed + i)
    b. Write /workspace/INSTRUCTION.md with task for sequence[i]
    c. Launch harness with universal prompt
@@ -440,8 +439,8 @@ Per-scenario regression over 4-8 repetitions. High quality AND improving = win.
    f. Judge: hybrid grading — automated checks + LLM judge → quality score (0.0–1.0)
 5. Tear down sandbox
 6. Score:
-   - Per-scenario learning curves (regression slope over 4-8 reps)
-   - final_score = mean(quality) * (1 + mean(learning_rates))
+   - Per-scenario delta: quality[rep2] - quality[rep1]
+   - final_score = mean(quality) * (1 + mean(deltas))
 ```
 
 One scoring mechanism, one formula. No gates, no thresholds.
@@ -450,59 +449,55 @@ One scoring mechanism, one formula. No gates, no thresholds.
 
 ## Episode Sequence Design
 
-### Few Scenarios, Many Repetitions
+### Fixed Sequence: 4 Episodes
 
-Instead of spreading N episodes across 7 scenario types (~2 repetitions each, weak signal), use **2 deep scenarios repeated 4-8 times each** (strong signal).
+Instead of spreading N episodes across many scenario types, use **2 scenarios × 2 reps = 4 episodes fixed**. Minimum viable learning signal at practical cost.
 
 ```python
-rng = Random(epoch_seed)
+# Fixed sequence — no randomization needed
+sequence = [
+    ("incident_response", epoch_seed + 1),
+    ("codebase_fix",      epoch_seed + 2),
+    ("incident_response", epoch_seed + 3),
+    ("codebase_fix",      epoch_seed + 4),
+]
 
-scenarios = ["incident_response", "codebase_fix"]   # 2 deep scenarios
-N = rng.randint(8, 16)
-sequence = [rng.choice(scenarios) for _ in range(N)]
-rng.shuffle(sequence)
-
-# Each episode gets unique data from the same scenario template
-for i, scenario in enumerate(sequence):
-    fixtures = generate(epoch_seed + i, scenario)
+for scenario, seed in sequence:
+    fixtures = generate(seed, scenario)
 ```
 
-**Example: Epoch A (N=10):**
+**Every epoch:**
 
 ```
- E1:  incident_response   (data_seed_1)    ← 1st attempt
- E2:  codebase_fix        (data_seed_2)    ← 1st attempt
- E3:  incident_response   (data_seed_3)    ← 2nd attempt, should improve
- E4:  incident_response   (data_seed_4)    ← 3rd attempt
- E5:  codebase_fix        (data_seed_5)    ← 2nd attempt, should improve
- E6:  codebase_fix        (data_seed_6)    ← 3rd attempt
- E7:  incident_response   (data_seed_7)    ← 4th attempt
- E8:  codebase_fix        (data_seed_8)    ← 4th attempt
- E9:  incident_response   (data_seed_9)    ← 5th attempt, should be best
-E10:  codebase_fix        (data_seed_10)   ← 5th attempt, should be best
+E1:  incident_response   (data_seed_1)    ← 1st attempt
+E2:  codebase_fix        (data_seed_2)    ← 1st attempt
+E3:  incident_response   (data_seed_3)    ← 2nd attempt, should improve
+E4:  codebase_fix        (data_seed_4)    ← 2nd attempt, should improve
 ```
 
-Each scenario appears 4-8 times with different data. The learning curve per scenario is the signal — not a noisy global regression across unrelated tasks.
+Learning signal = delta: `quality[rep2] - quality[rep1]` per scenario. Did quality improve on the second attempt? Simple, no regression needed.
+
+**Capacity:** 4 episodes × 10 min = 40 min/miner. 200 miners × 10 parallel containers = ~13h. Comfortable within 24h epoch.
 
 **Why 2 scenarios, not 1 or 7:**
 
 | Count | Pros | Cons |
 |-------|------|------|
 | 1 | Maximum repetitions, cleanest signal | No breadth testing, over-fits to one task type |
-| 2 | Strong signal (4-8 reps each), tests two domains | Moderate breadth |
-| 7 | Maximum breadth | ~2 reps each, noisy signal, hard to measure learning |
+| 2 | Tests two domains, 2 reps each for delta signal | Moderate breadth |
+| 7 | Maximum breadth | ~1 rep each, no learning signal possible |
 
-Two is the sweet spot: enough repetitions for a clear learning curve, enough variety to prevent single-scenario overfitting.
+Two is the sweet spot: enough repetitions for a delta signal, enough variety to prevent single-scenario overfitting.
 
 **Scenario selection criteria:**
 - **Deep**: many sub-tasks, decision points, safety constraints (room to improve)
 - **Different domains**: one knowledge-worker, one code/technical
-- **Complex enough** that a first attempt is genuinely harder than a fifth attempt with accumulated patterns
+- **Complex enough** that a first attempt is genuinely harder than a second attempt with accumulated patterns
 
 ### Key Properties
 
-- **Repeated scenarios**: 4-8 attempts per scenario = clear per-scenario learning curve
-- **Variable N**: can't predict when eval ends
+- **Fixed N=4**: predictable eval time, no randomization overhead
+- **2 reps per scenario**: minimum viable delta signal
 - **Different data each attempt**: same scenario template, completely different content
 - **Two domains**: learning must work for both knowledge work and code tasks
 
@@ -515,43 +510,36 @@ Two is the sweet spot: enough repetitions for a clear learning curve, enough var
   "miner_uid": 42,
   "pack_hash": "abc123...",
   "episodes": [
-    {"id": 1,  "scenario": "incident_response", "quality": 0.45},
-    {"id": 2,  "scenario": "codebase_fix",       "quality": 0.40},
-    {"id": 3,  "scenario": "incident_response", "quality": 0.62},
-    {"id": 4,  "scenario": "codebase_fix",       "quality": 0.58},
-    {"id": 5,  "scenario": "incident_response", "quality": 0.71},
-    {"id": 6,  "scenario": "codebase_fix",       "quality": 0.65},
-    {"id": 7,  "scenario": "incident_response", "quality": 0.78},
-    {"id": 8,  "scenario": "codebase_fix",       "quality": 0.72},
-    {"id": 9,  "scenario": "incident_response", "quality": 0.82},
-    {"id": 10, "scenario": "codebase_fix",       "quality": 0.79}
+    {"id": 1, "scenario": "incident_response", "quality": 0.45},
+    {"id": 2, "scenario": "codebase_fix",      "quality": 0.40},
+    {"id": 3, "scenario": "incident_response", "quality": 0.68},
+    {"id": 4, "scenario": "codebase_fix",      "quality": 0.61}
   ],
   "per_scenario": {
-    "incident_response": {"mean": 0.676, "learning_rate": 0.088},
-    "codebase_fix":       {"mean": 0.628, "learning_rate": 0.094}
+    "incident_response": {"rep1": 0.45, "rep2": 0.68, "delta": 0.23},
+    "codebase_fix":      {"rep1": 0.40, "rep2": 0.61, "delta": 0.21}
   },
-  "overall_quality": 0.652,
-  "overall_learning": 0.091,
-  "final_score": 0.711
+  "mean_quality": 0.535,
+  "mean_delta": 0.22,
+  "final_score": 0.653
 }
 ```
 
-Per-scenario learning curves — each with 5 data points — are the evaluation output.
+Per-scenario delta (rep2 - rep1) is the learning signal. `final_score = mean_quality * (1 + mean_delta)`.
 
 ---
 
 ## Anti-Gaming Analysis
 
-Four mechanisms work together:
+Three mechanisms work together:
 
 | Mechanism | What it prevents |
 |-----------|-----------------|
 | Varying data (generated fixtures) | Memorization of specific answers |
-| Per-scenario regression (4-8 reps) | Noise-based gaming (too few data points to fake a trend) |
-| Variable episode count (N=8-16) | Endpoint targeting (inflate early, deflate late) |
+| Hybrid grading (automated + LLM judge) | Regex gaming, hallucinated quality |
 | LLM judge (not cost-based) | Scheduled efficiency tricks (e.g. "be verbose early, concise later") |
 
-A successful gaming strategy would need to defeat all four simultaneously.
+A successful gaming strategy would need to defeat all three simultaneously.
 
 Using the LLM judge as the sole scoring mechanism eliminates a class of gaming strategies that cost-based scoring is vulnerable to. A miner cannot trick a judge into seeing quality improvement — the judge evaluates the actual trajectory outcome, not a proxy metric.
 
@@ -583,7 +571,7 @@ The primary unknowns are in the **multi-episode learning signal** (how to reliab
 
 ~~With many scenarios and few repetitions, the learning signal was noisy.~~
 
-**Resolution:** Reduced to 2 deep scenarios repeated 4-8 times each. Per-scenario regression over 4-8 data points is statistically meaningful. This is a direct fix, not a mitigation.
+**Resolution:** Reduced to 2 scenarios × 2 reps = 4 episodes. Learning signal is a simple delta (rep2 - rep1) per scenario. No regression needed.
 
 ### 2. Learned memory growth vs. quality trade-off
 
@@ -593,21 +581,21 @@ As `/workspace/learned/` accumulates patterns, the agent spends more tokens read
 
 ### 3. LLM judge variance across validators
 
-The LLM judge is probabilistic. Validator A and Validator B may score the same trajectory differently. With N=12 episodes per miner, small per-episode variance compounds into meaningful disagreement on `mean_quality` and `learning_rate`.
+The LLM judge is probabilistic. Validator A and Validator B may score the same trajectory differently. With N=4 episodes per miner, per-episode variance directly affects `mean_quality` and `delta`.
 
 **Mitigation:** Use structured rubrics with binary sub-criteria per dimension (e.g., correctness, completeness, safety) rather than a single numeric score. Binary judgments are more reproducible across LLM calls. Quality score = fraction of criteria passed. Alternatively, use median-of-validators scoring.
 
 ### 4. Evaluation cost and time
 
-Each miner requires 8-16 episodes × (agent runtime + judge call). At ~3 min/episode, a 12-episode eval takes ~36 min per miner. With 50 miners and 10 parallel containers: ~3 hours per epoch.
+Each miner requires 4 episodes × 10 min timeout = 40 min per miner. With 200 miners and 10 parallel containers: ~13 hours per epoch.
 
-**Mitigation:** This is within the 24h epoch window. Parallel containers scale linearly. Judge calls can be batched. LLM cost per epoch (~$30-50 at current rates) is manageable for validators earning TAO emissions.
+**Mitigation:** Comfortable within the 24h epoch window. Parallel containers scale linearly. Judge calls can be batched. LLM cost per epoch (~$20-30 at current rates) is manageable for validators earning TAO emissions.
 
 ### 5. The "already good" problem
 
-A miner whose SKILL.md produces high-quality trajectories from episode 1 shows no improvement slope (`learning_rate ≈ 0`). The formula `mean(quality) * (1 + learning_rate)` still rewards high absolute quality, but does not distinguish "consistently excellent" from "mediocre but slightly improving."
+A miner whose SKILL.md produces high-quality trajectories from episode 1 shows no improvement (`delta ≈ 0`). The formula `mean(quality) * (1 + mean(deltas))` still rewards high absolute quality, but does not distinguish "consistently excellent" from "mediocre but slightly improving."
 
-**Mitigation:** The formula handles this — `mean(quality)` dominates when `learning_rate` is near zero. A miner scoring 0.95 across all episodes gets `final_score = 0.95`, which beats a miner improving from 0.4 to 0.7 (`mean=0.55, rate=0.05, final=0.578`). The learning bonus rewards improvement but doesn't override raw quality.
+**Mitigation:** The formula handles this — `mean(quality)` dominates when delta is near zero. A miner scoring 0.90 on both reps gets `final_score = 0.90`, which beats a miner improving from 0.40 to 0.65 (`mean=0.525, delta=0.25, final=0.656`). The learning bonus rewards improvement but doesn't override raw quality.
 
 ### 6. Miner meta-game evolution
 
@@ -623,7 +611,7 @@ A miner whose SKILL.md produces high-quality trajectories from episode 1 shows n
 
 ## Season 1 Scenarios
 
-Two deep, complex scenarios — one knowledge-worker, one code/technical. Each must have enough sub-tasks and decision points that a first attempt is genuinely harder than a fifth.
+Two deep, complex scenarios — one knowledge-worker, one code/technical. Each must have enough sub-tasks and decision points that a first attempt is genuinely harder than a second.
 
 Design principles:
 
@@ -793,7 +781,7 @@ Gaming surface: memorize fixture data, reverse-engineer check types, hardcode sc
 
 Miners optimize for: "most capable self-learning agent that measurably improves across repeated attempts at complex tasks."
 
-Gaming surface: reduced — procedural data prevents memorization, LLM judge prevents regex gaming, per-scenario quality curves over 4-8 repetitions prevent noise-based gaming.
+Gaming surface: reduced — procedural data prevents memorization, LLM judge prevents regex gaming, hybrid grading prevents hallucinated quality.
 
 The evaluation structurally selects for agent engineering capability over benchmark optimization.
 
@@ -824,9 +812,9 @@ This phase is deployable independently. Even without the Docker sandbox, LLM-gen
 
 - Implement episode runner with persistent workspace
 - Implement per-scenario quality curve scoring
-- Implement variable N from epoch_seed, 2-scenario interleaving
+- Implement fixed 4-episode sequence (A→B→A→B), delta-based scoring
 - Port AGENTS.md → SKILL.md format
-- **Test:** Run 10-episode sequences (5 reps × 2 scenarios), verify learning curves
+- **Test:** Run 4-episode sequences (2 reps × 2 scenarios), verify delta signal
 
 ### Phase 4: Scoring Rewrite
 
@@ -852,7 +840,7 @@ The entire system needs:
 1. **Sandbox**: Docker + mock services + SKILL.md mount
 2. **Episode runner**: Loop that resets data, delivers prompt, captures transcript
 3. **LLM judge**: Score each trajectory 0.0–1.0 (already built in v1, extend to quality scoring)
-4. **Scorer**: Per-scenario learning curves → `final_score = mean(quality) * (1 + mean(learning_rates))`
+4. **Scorer**: Per-scenario delta → `final_score = mean(quality) * (1 + mean(deltas))`
 
 Four components. The judge already exists. The new work is: sandbox + episode runner.
 
