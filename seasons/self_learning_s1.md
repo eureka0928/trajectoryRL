@@ -151,7 +151,8 @@ Docker Container ("eval sandbox")
 │   └── ~/.config/ pre-configured to point at local mock services
 │
 ├── Workspace
-│   ├── /workspace/SKILL.md    (miner's pack — PERSISTS across episodes)
+│   ├── /workspace/SKILL.md    (miner's pack — READ-ONLY, never modified)
+│   ├── /workspace/INSTRUCTION.md  (per-episode task — RESETS each episode)
 │   ├── /workspace/learned/    (agent's learning store — PERSISTS)
 │   ├── /workspace/...         (pack files)
 │   └── /workspace/docs/       (scenario-specific reference docs)
@@ -179,8 +180,8 @@ Container lifecycle:
   ┌──────────────────────────────────────────────┐
   │  Docker Sandbox (persistent across episodes) │
   │                                              │
-  │  /workspace/SKILL.md  ← PERSISTS             │
-  │  /workspace/learned/  ← PERSISTS             │
+  │  /workspace/SKILL.md  ← READ-ONLY (miner's)   │
+  │  /workspace/learned/  ← PERSISTS (agent's)    │
   │                                              │
   │  Mock services        ← DATA RESETS each ep  │
   │  Shell history        ← CAPTURED each ep     │
@@ -191,11 +192,11 @@ Between episodes:
   1. Capture: shell transcript, cost, service state
   2. Score: LLM judge → quality score (0.0–1.0)
   3. Reset: reload mock services with new fixtures
-  4. Preserve: /workspace/SKILL.md, /workspace/learned/
+  4. Preserve: /workspace/learned/ (SKILL.md is read-only, always preserved)
   5. Start next episode
 ```
 
-The container never stops. Only the "world" resets. The agent's brain (SKILL.md + any files it creates) persists.
+The container never stops. Only the "world" resets. SKILL.md is read-only (miner's product). The agent's learned memory (`/workspace/learned/`) persists.
 
 ---
 
@@ -203,48 +204,69 @@ The container never stops. Only the "world" resets. The agent's brain (SKILL.md 
 
 Rename AGENTS.md → **SKILL.md**. A skill file is a plain markdown document that any agent framework can consume. The sandbox places it at `/workspace/SKILL.md`. The agent harness — whatever it is — reads it.
 
+SKILL.md is **static** — a finished product the miner ships. It contains domain knowledge, task execution patterns, safety rules, and memory management strategy. It does not contain workspace plumbing or meta-instructions (those come from the harness).
+
 ```markdown
-# SKILL.md (miner-authored)
+# SKILL.md — example (miner-authored, static)
 
-## Instructions
-[How to approach tasks, tool usage patterns, safety rules, etc.]
+## Task Execution
+- Break complex tasks into steps. Verify each step before proceeding.
+- For email: MailHog API at localhost:1080, SMTP at localhost:1025.
+- For tasks: Notion API at localhost:8080.
+- For Slack: API at localhost:8082.
+- For code: read tests first, understand expected behavior, then fix.
+- For GitHub: Gitea at localhost:3000, git SSH at localhost:2222.
 
-## Learned Patterns
-[Initially empty. Agent appends here as it learns.]
+## Safety Rules
+- Never share SOC 2, acquisition, or HR data in public channels
+- Verify recipient before sending sensitive emails
+- Check file contents before committing — no secrets in code
 
-## Project Context
-[Accumulated knowledge about the workspace, codebase, team, etc.]
+## Memory Strategy
+- After each task, append one-line patterns to /workspace/learned/patterns.md
+- Log errors to /workspace/learned/mistakes.md to avoid repeating them
+- Before starting, read /workspace/learned/ for prior insights
+- Keep entries concise. Delete outdated entries when superseded.
 ```
 
-The miner authors the initial `Instructions` section. The `Learned Patterns` and `Project Context` sections start empty and grow as the agent self-improves across episodes.
+**Key properties:**
+- **Static.** SKILL.md never changes during evaluation. The miner ships a finished product.
+- **Pure domain knowledge.** No workspace layout instructions, no meta-prompts. Just how to do the work.
+- **Framework-agnostic.** Any agent that can read a file can use it.
+- **Learning goes elsewhere.** The agent writes to `/workspace/learned/`, not to SKILL.md.
 
-**Why SKILL.md works:**
-- It's just a file. No special protocol, no API, no framework dependency.
-- The agent reads it at episode start, writes to it at episode end.
-- The validator doesn't need to understand the format — it just doesn't delete it between episodes.
-- Miners compete on how well their SKILL.md teaches the agent to learn, not on memorizing scenarios.
+Miners compete on the quality of these instructions — better safety rules, smarter memory structure, better task execution patterns.
 
-**Reference implementation:** [ivangdavila/self-improving](https://clawhub.ai/ivangdavila/self-improving) is an existing skill that uses three-tier memory (HOT/WARM/COLD) with auto-promotion of patterns after repeated use. It is instruction-only, framework-agnostic, and requires no external dependencies — exactly the kind of approach this evaluation is designed to test. A well-engineered SKILL.md should outperform it by optimizing specifically for cost reduction across episodes rather than general-purpose memory management.
+**Reference implementation:** [ivangdavila/self-improving](https://clawhub.ai/ivangdavila/self-improving) uses three-tier memory (HOT/WARM/COLD) with auto-promotion of patterns after repeated use. Instruction-only, framework-agnostic, no external dependencies.
 
-### Harness Adapters
+### Harness: Universal Prompt + Adapters
 
-The miner declares which agent framework to use in `pack.yaml`. The validator has **predefined harness adapters** — no miner code executes, only whitelisted binaries.
+The validator injects a **universal prompt** that handles all workspace plumbing. This prompt is the same for every miner — it tells the agent where to find things. The miner's SKILL.md stays clean.
+
+```
+Universal prompt (validator-injected, same for all miners):
+
+  Read /workspace/SKILL.md for your instructions and domain knowledge.
+  Read /workspace/INSTRUCTION.md for this episode's task.
+  After completing the task, write reflections to /workspace/learned/.
+  Do not modify SKILL.md.
+```
+
+The miner declares which agent framework to use in `pack.yaml`:
 
 ```yaml
 # pack.yaml (miner-provided)
 harness: claude-code    # from whitelist
 ```
 
-| Harness | Validator copies SKILL.md to | Launches |
-|---------|------------------------------|----------|
-| `claude-code` | `/workspace/CLAUDE.md` | `claude --task "$PROMPT"` |
-| `cursor` | `/workspace/.cursor/rules` | `cursor-agent --task "$PROMPT"` |
-| `openclaw` | `/workspace/AGENTS.md` | `openclaw run --task "$PROMPT"` |
-| `raw-bash` | (reads directly) | `bash -c "cat SKILL.md && $PROMPT"` |
+| Harness | Launches |
+|---------|----------|
+| `claude-code` | `claude --task "$UNIVERSAL_PROMPT"` |
+| `cursor` | `cursor-agent --task "$UNIVERSAL_PROMPT"` |
+| `openclaw` | `openclaw run --task "$UNIVERSAL_PROMPT"` |
+| `raw-bash` | `bash -c "$UNIVERSAL_PROMPT"` |
 
-After each episode, the adapter syncs back: e.g., `cp CLAUDE.md SKILL.md` so learned patterns persist in the canonical location.
-
-**Security:** Miners control SKILL.md content only — not execution. Adding a new framework = adding one adapter to the validator (a few lines of shell). The harness whitelist is part of the validator release, not configurable by miners.
+**Security:** Miners control SKILL.md content only — not execution. No miner code runs. Adding a new framework = adding one adapter to the validator (a few lines of shell). The harness whitelist is part of the validator release, not configurable by miners.
 
 ---
 
@@ -411,8 +433,9 @@ Per-scenario regression over 4-8 repetitions. High quality AND improving = win.
    - sequence = interleave(2 scenarios, N)          ← 4-8 reps each
 4. For episode i = 1..N:
    a. Reset mock service data (new fixtures from epoch_seed + i)
-   b. Deliver task prompt: sequence[i]
-   c. Agent runs: reads SKILL.md → does task → updates SKILL.md
+   b. Write /workspace/INSTRUCTION.md with task for sequence[i]
+   c. Launch harness with universal prompt
+   d. Agent runs: reads SKILL.md + learned/ + INSTRUCTION.md → does task → writes to learned/
    d. Capture: shell transcript + mock service state
    e. Judge: LLM evaluates trajectory → quality score (0.0–1.0)
 5. Tear down sandbox
@@ -562,11 +585,11 @@ The primary unknowns are in the **multi-episode learning signal** (how to reliab
 
 **Resolution:** Reduced to 2 deep scenarios repeated 4-8 times each. Per-scenario regression over 4-8 data points is statistically meaningful. This is a direct fix, not a mitigation.
 
-### 2. SKILL.md growth vs. quality trade-off
+### 2. Learned memory growth vs. quality trade-off
 
-As SKILL.md accumulates patterns, it grows. A larger SKILL.md means the agent spends more tokens reading context before each task. Without pruning, later episodes may degrade as context bloat reduces agent effectiveness.
+As `/workspace/learned/` accumulates patterns, the agent spends more tokens reading context before each task. Without pruning, later episodes may degrade as context bloat reduces agent effectiveness.
 
-**Mitigation:** This is intentionally part of the competition — miners must engineer SKILL.md with pruning and compression strategies. A size cap (Open Question #3) provides a hard bound.
+**Mitigation:** This is intentionally part of the competition — miners must engineer SKILL.md with pruning and compression instructions. A disk cap on `/workspace/learned/` (Open Question #3) provides a hard bound.
 
 ### 3. LLM judge variance across validators
 
@@ -588,9 +611,9 @@ A miner whose SKILL.md produces high-quality trajectories from episode 1 shows n
 
 ### 6. Miner meta-game evolution
 
-**Month 1-2:** Basic SKILL.md files ("reflect after each task"). Low differentiation. Most miners produce similar quality trajectories.
+**Month 1-2:** Basic SKILL.md files ("reflect after each task, write to learned/"). Low differentiation. Most miners produce similar quality trajectories.
 
-**Month 3-4:** Top miners discover that SKILL.md structure matters — concise pattern storage, good categorization, pruning instructions. Separation emerges.
+**Month 3-4:** Top miners discover that SKILL.md instruction quality matters — better memory management strategies, smarter pruning rules, domain-specific heuristics. Separation emerges.
 
 **Long-term:** Competition converges on optimal memory management strategies. The eval must add new scenario types (Phase 6) to maintain competitive pressure.
 
@@ -703,8 +726,8 @@ Four components. The judge already exists. The new work is: sandbox + episode ru
 
 1. **Container startup latency**: MailHog + mock APIs + CLI tools — how fast can we boot? Target: < 5s.
 2. **Mock service fidelity**: How closely do mock APIs need to match real ones? Basic CRUD or full query filter support?
-3. **SKILL.md size limit**: Cap to prevent unbounded growth? 500 lines? 10KB?
-4. **Cross-epoch learning**: Should SKILL.md persist across epochs (24h), or reset each epoch?
+3. **Learned memory size limit**: Cap `/workspace/learned/` to prevent unbounded growth? 100KB? 1MB?
+4. **Cross-epoch learning**: Should `/workspace/learned/` persist across epochs (24h), or reset each epoch?
 5. **Fixture hash consensus**: >50% stake agreement sufficient, or do we need a canonical generator?
 6. **Judge scoring rubric**: How many sub-criteria per scenario? More criteria = finer signal but higher judge cost. Structured rubric (binary per criterion) vs. holistic numeric score?
 7. **Judge consistency across validators**: Same trajectory may get different scores from different validators' judge calls. Median-of-validators? Or deterministic judge (structured rubric)?
