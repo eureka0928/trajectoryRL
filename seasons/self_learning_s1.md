@@ -28,7 +28,7 @@ Run a sequence of tasks, judge each trajectory, score the trend. The same LLM ju
 
 1. **Single mechanism.** The LLM judge scores trajectories — same approach across any task type, any domain, any agent framework. No custom scoring infrastructure needed.
 
-2. **Agent-harness-agnostic.** The interface is: SSH into a sandbox, read SKILL.md, execute. The validator only sees cost per episode and PASS/FAIL.
+2. **Agent-harness-agnostic.** The interface is: SSH into a sandbox, read SKILL.md, execute. The validator only sees a quality score per episode.
 
    | Framework | How it consumes SKILL.md |
    |-----------|-------------------------|
@@ -180,7 +180,7 @@ Container lifecycle:
 
 Between episodes:
   1. Capture: shell transcript, cost, service state
-  2. Score: LLM judge PASS/FAIL
+  2. Score: LLM judge → quality score (0.0–1.0)
   3. Reset: reload Tier 1 services with new fixtures
   4. Preserve: /workspace/SKILL.md, /workspace/learned/
   5. Start next episode
@@ -346,10 +346,12 @@ The judge produces a quality score per episode (0.0–1.0) covering correctness,
 
 The learning signal is whether quality scores improve over episodes:
 
-- Flat at low quality = not learning (no reward)
-- Flat at high quality = already capable but not improving (moderate reward)
-- Upward trend = genuinely learning from experience (high reward)
-- Steep upward trend = fast learner (maximum reward)
+- Flat at low quality = not learning (low score)
+- Flat at high quality = already capable, not improving (high score, no learning bonus)
+- Upward trend = learning from experience (high score + learning bonus)
+- Steep upward trend = fast learner (maximum score)
+
+No separate gate. A bad episode scores low (e.g. 0.1) and drags down `mean(quality)`. The formula handles it naturally — no binary disqualification needed.
 
 ```
 episode_scores = [judge_quality(trajectory_i) for i in 1..N]
@@ -380,7 +382,7 @@ High quality AND improving = win.
    - final_score = mean(quality_scores) * (1 + learning_rate)
 ```
 
-**Quality:** LLM judge scores each trajectory. **Learning:** quality trend across episodes.
+One scoring mechanism, one formula. No gates, no thresholds.
 
 ---
 
@@ -492,7 +494,7 @@ These parts of the design solve real v1 problems regardless of how scoring evolv
 
 4. **State-based scoring evidence.** Checking MailHog API for "is there an email to Dana?" instead of regex-matching `himalaya send` is a qualitative leap. Agents are free to use any tool or method. The scoring sees outcomes, not commands.
 
-5. **LLM judge as universal scorer.** Already proven in v1. Extending it from PASS/FAIL to quality scoring is incremental, not architectural. The judge is the one component that doesn't need to be built from scratch.
+5. **LLM judge as universal scorer.** Already proven in v1. Extending it to continuous quality scoring (0.0–1.0) is incremental, not architectural. No separate gate mechanism — low quality episodes simply score low. The judge is the one component that doesn't need to be built from scratch.
 
 The primary unknowns are in the **multi-episode learning signal** (how to reliably measure improvement with small N) and **cross-validator determinism** (Tier 2 mocks, judge variance). These are addressed in the risks section below.
 
@@ -516,11 +518,11 @@ As SKILL.md accumulates patterns, it grows. A larger SKILL.md means the agent sp
 
 The LLM judge is probabilistic. Validator A and Validator B may score the same trajectory differently. With N=12 episodes per miner, small per-episode variance compounds into meaningful disagreement on `mean_quality` and `learning_rate`.
 
-**Mitigation:** Use structured rubrics with binary sub-criteria (PASS/FAIL per criterion) rather than a single numeric score. Binary judgments are more reproducible across LLM calls. Quality score = fraction of criteria passed. Alternatively, use median-of-validators scoring.
+**Mitigation:** Use structured rubrics with binary sub-criteria per dimension (e.g., correctness, completeness, safety) rather than a single numeric score. Binary judgments are more reproducible across LLM calls. Quality score = fraction of criteria passed. Alternatively, use median-of-validators scoring.
 
 ### 4. Tier 2 non-determinism across validators
 
-LLM-backed runtime mocks (web_search, memory) produce different responses for different validators. The agent takes different paths, leading to different trajectories and potentially different PASS/FAIL outcomes.
+LLM-backed runtime mocks (web_search, memory) produce different responses for different validators. The agent takes different paths, leading to different trajectories and potentially different quality scores.
 
 **Mitigation:** Defer Tier 2 to a later phase. Start with Tier 1 (deterministic) + Tier 3 (fixture factory) only. Or pre-generate Tier 2 responses at build time (making them effectively Tier 3) and cache by fixture_hash.
 
@@ -673,5 +675,5 @@ Four components. The judge already exists. The new work is: sandbox + episode ru
 7. **Fixture hash consensus**: >50% stake agreement sufficient, or do we need a canonical generator?
 8. **Tier 2 session consistency**: How to prevent contradictions across multiple LLM-mock calls? Cache-only, or session context?
 9. **Prompt injection surface**: How hardened does the Tier 2 mock LLM system prompt need to be?
-10. **Judge scoring granularity**: Binary PASS/FAIL vs. continuous 0.0–1.0? Continuous is richer but noisier across validators.
+10. **Judge scoring rubric**: How many sub-criteria per scenario? More criteria = finer signal but higher judge cost. Structured rubric (binary per criterion) vs. holistic numeric score?
 11. **Judge consistency across validators**: Same trajectory may get different scores from different validators' judge calls. Median-of-validators? Or deterministic judge (structured rubric)?
