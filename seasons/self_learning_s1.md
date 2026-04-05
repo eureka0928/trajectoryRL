@@ -1,6 +1,6 @@
 # Season 1: Self-Learning Agents
 
-> v0.13: Validator-mandated framework rotation. Miners compete on SKILL.md quality only.
+> v0.14: Cross-validator fixture variation reframed as Monte Carlo sampling via consensus aggregation.
 
 ---
 
@@ -320,13 +320,9 @@ epoch_seed
 - Current: write scenario YAML + hand-craft 5-10 fixture JSON files (days)
 - Proposed: write scenario YAML + fixture generation prompt + scoring spec (hours)
 
-### Determinism Across Validators
+### Cross-Validator Variation as Monte Carlo Sampling
 
-LLM-based generation is inherently non-deterministic. Even with `temperature=0`, different providers, hardware, and batching strategies produce different outputs. A canonical fixture server would solve this but creates a centralization point and, worse, lets miners pre-compute fixtures (the epoch_seed is public).
-
-**Solution: Validator-private salt.**
-
-Each validator generates fixtures using a private salt that miners cannot predict:
+Each validator generates fixtures using a **private salt**, producing different fixture data for the same scenario. This is not a deficiency to work around. It is a deliberate design that turns the existing consensus protocol into a Monte Carlo estimator of miner quality.
 
 ```
 1. Each validator generates a validator_salt (random, stored locally, never shared during eval)
@@ -337,11 +333,18 @@ Each validator generates fixtures using a private salt that miners cannot predic
 6. Anyone can verify: regenerate from epoch_seed + published validator_salt → compare fixture_hash
 ```
 
-This prevents pre-computation: the `epoch_seed` is public but the `validator_salt` is not revealed until after scoring. Miners cannot predict fixtures for any specific validator. Since Bittensor validators set weights independently (the chain aggregates via stake-weighting), per-validator fixture variation is acceptable. Relative rankings within each validator's eval are what matter, not absolute scores.
+**Why variation is desirable.** Each validator tests the miner on a different sample from the fixture distribution. Validator A generates an incident with a "SOC 2 audit" confidentiality trap; Validator B generates one with "acquisition talks." A miner whose SKILL.md handles both cases will score well across validators. A miner who overfits to one pattern will score well on some validators and poorly on others. Stake-weighted aggregation across validators (see INCENTIVE_MECHANISM.md, Section "Stake-Weighted Aggregation") produces a consensus score that reflects the miner's *expected* quality over the fixture distribution, not their performance on any single instance.
 
-**Why not a canonical fixture server?** A shared fixture bundle is downloadable before evaluation starts. Combined with the public epoch_seed and open-source scenario templates, miners could pre-compute optimal responses. The private salt eliminates this attack entirely.
+```
+consensus_score[miner] = Σ(stake_i × score_i) / Σ(stake_i)
+                          where i ∈ {validators reporting on this miner}
+```
 
-**Alternative (no LLM in fixture generation):** Use PRNG + structured templates for all fixture generation. The LLM is used only during one-time scenario authoring (writing templates), not at eval time. This makes generation fully deterministic from `fixture_seed` alone, at the cost of less naturalistic fixture content. With this approach, the private salt still prevents pre-computation.
+More validators = more samples = better estimate. This is the same principle as the v4.0 cross-validator consensus for cost, applied here to quality scores.
+
+**Why not a canonical fixture server?** A shared fixture bundle gives every validator the same data, collapsing the Monte Carlo samples to a single point. Worse, the bundle is downloadable before evaluation, letting miners pre-compute optimal responses. The private salt eliminates both problems: it prevents pre-computation and it produces the cross-validator variation that makes aggregation informative.
+
+**Alternative (no LLM in fixture generation):** Use PRNG + structured templates for all fixture generation. The LLM is used only during one-time scenario authoring (writing templates), not at eval time. This makes generation fully deterministic from `fixture_seed` alone, at the cost of less naturalistic fixture content. The private salt still prevents pre-computation, and cross-validator variation still holds (each validator's salt produces a different PRNG sequence).
 
 ---
 
@@ -530,7 +533,10 @@ As `/workspace/learned/` accumulates patterns, the agent spends more tokens read
 
 The LLM judge is probabilistic. Validator A and Validator B may score the same trajectory differently. With N=4 episodes per miner, per-episode variance directly affects `mean_quality` and `delta`.
 
-**Mitigation:** Use structured rubrics with binary sub-criteria per dimension (e.g., correctness, completeness, safety) rather than a single numeric score. Binary judgments are more reproducible across LLM calls. Quality score = fraction of criteria passed. Alternatively, use median-of-validators scoring.
+**Mitigation (two layers):**
+
+1. **Structured rubrics.** Use binary sub-criteria per dimension (e.g., correctness, completeness, safety) rather than a single numeric score. Binary judgments are more reproducible across LLM calls. Quality score = fraction of criteria passed.
+2. **Cross-validator aggregation.** Each validator evaluates on different fixture data (via private salt) and produces an independent score. Stake-weighted averaging across validators suppresses per-validator noise and produces a consensus score that reflects the miner's expected quality over the fixture distribution. This is the same consensus mechanism used in v4.0 for cost aggregation (see INCENTIVE_MECHANISM.md).
 
 ### 3. Evaluation cost and time
 
