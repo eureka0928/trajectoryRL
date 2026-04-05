@@ -138,7 +138,7 @@ The agent harness (Claude Code, Cursor, OpenClaw, etc.) runs **on the validator 
 │   openclaw, raw-bash)       │───────→│  ├── Notion API (:8080)              │
 │                             │        │  ├── Calendar   (:8081)              │
 │  Makes LLM API calls        │        │  ├── Slack API  (:8082)              │
-│  directly (miner's key)     │        │  └── Gitea      (:3000, :2222)       │
+│  directly (validator's key) │        │  └── Gitea      (:3000, :2222)       │
 │                             │        │                                      │
 │  Transcript captured by     │        │  Workspace                           │
 │  validator orchestrator     │        │  ├── /workspace/SKILL.md   (RO)      │
@@ -276,7 +276,7 @@ harness: claude-code    # from whitelist
 
 Each adapter is a thin wrapper (~5 lines) that: (1) pulls the publisher's official image, (2) passes the universal prompt + SSH credentials, (3) captures the session transcript. The agent framework handles tool execution via SSH natively — this is how Claude Code, Cursor, etc. already work with remote environments.
 
-**Security:** Miners control SKILL.md content only — not execution. No miner code runs inside the sandbox. The sandbox has all egress blocked (fully offline). The agent harness runs on the validator host with access to the miner's LLM API key (for inference) and SSH access to the sandbox (for tool execution). The harness container is also resource-capped and hard-timed.
+**Security:** Miners control SKILL.md content only — not execution. No miner code runs inside the sandbox. The sandbox has all egress blocked (fully offline). The agent harness runs on the validator host using the validator's LLM API key (consistent with v4.0 — validators bear all inference costs) and SSH access to the sandbox (for tool execution). The harness container is also resource-capped and hard-timed.
 
 **The `raw-bash` escape hatch:** The harness whitelist includes pre-configured adapters for common frameworks (convenience), but `raw-bash` is always available. Any agent framework that can be invoked from a bash command and connect to a remote shell works:
 
@@ -645,12 +645,16 @@ Each miner requires 4 episodes × 10 min timeout = 40 min per miner (budget 50 m
 | Infrastructure | 10 Docker containers × 24h (compute + storage) | $20–50 |
 | **Total per epoch** | | **$460–1,690** |
 
-The dominant cost is agent LLM calls — the model invocations the agent harness makes on the validator host while operating the sandbox remotely. Two models for who pays:
+The dominant cost is agent LLM calls — the model invocations the agent harness makes on the validator host while operating the sandbox remotely. Consistent with v4.0, **validators bear all inference costs** (both agent execution and judge calls). Miners have zero ongoing cost — they ship a static SKILL.md and nothing else.
 
-- **Validator-pays:** Validator provides an API key; all agent LLM calls are billed to the validator. Simpler but expensive ($500–1,700/day).
-- **Miner-provides-key:** The miner's `pack.yaml` includes an API key (or endpoint URL); the validator passes it to the agent harness at launch. This shifts the dominant cost to miners, who are economically motivated to optimize.
+This is a significant cost increase over v4.0. In v4.0, OpenClaw runs a single agent loop per scenario (~$0.02–0.10/scenario). In Season 1, a full agent framework (Claude Code, Cursor) running 10-minute episodes will consume substantially more tokens — each episode may involve dozens of LLM round-trips as the agent investigates, acts, and reflects.
 
-**Recommendation:** Miner-provides-key for Season 1. Validators pay only for judging (~$60–90/epoch). Since the agent harness runs on the validator host (not inside the sandbox), LLM API calls go directly to the provider — no proxy or firewall exception needed. The sandbox remains fully offline.
+**Cost mitigation strategies:**
+
+- **Harness-aware cost caps.** The validator sets a per-episode token/dollar cap. The agent harness is killed if the cap is exceeded (episode scored as-is with whatever was completed). This bounds worst-case cost.
+- **Cheap default harness.** The default evaluation model remains GLM-5 (cheapest qualified model). Miners who want to use expensive models (Claude, GPT-5) must accept that their episodes cost more — but since Season 1 scores on quality (not cost), this is the miner's strategic choice expressed through SKILL.md instructions.
+- **Parallel containers amortize infra.** 10 Docker sandbox containers are lightweight (mock services only, no agent framework). The heavy resource is the agent harness on the validator host, which scales with available CPU/memory.
+- **Fewer miners in practice.** The 200-miner estimate is conservative. Early Season 1 will likely have 20–50 miners, bringing total cost to $50–400/epoch.
 
 **Mitigation for time:** 17h is within the 24h epoch with margin. Scale to 15–20 containers if miner count exceeds 200.
 
