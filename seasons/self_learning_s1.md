@@ -33,8 +33,8 @@ Run a sequence of tasks, judge each trajectory, score the trend. The same LLM ju
    | Framework | How it consumes SKILL.md |
    |-----------|-------------------------|
    | Claude Code | Reads as `CLAUDE.md` |
-   | Cursor | Reads as `.cursor/rules` |
    | OpenClaw | Reads as `AGENTS.md` |
+   | Hermes | Reads as task context |
    | Custom harness | `cat /workspace/SKILL.md` |
    | Raw LLM + bash | System prompt includes file |
 
@@ -128,15 +128,15 @@ v2: Agent → SSH/exec into Docker → real shell → real (mock) services → s
 
 ### Split Architecture: Agent Outside, Sandbox Inside
 
-The agent harness (Claude Code, Cursor, OpenClaw, etc.) runs **on the validator host** using the publisher's official Docker image or binary. It interacts with the sandbox via SSH/exec — the same way these tools work in production. The sandbox is a pure **workspace + mock services** container with no agent framework installed.
+The agent harness (Claude Code, OpenClaw, Hermes, etc.) runs **on the validator host** using the publisher's official Docker image or binary. It interacts with the sandbox via SSH/exec — the same way these tools work in production. The sandbox is a pure **workspace + mock services** container with no agent framework installed.
 
 ```
 ┌────────────────────────────┐        ┌──────────────────────────────────────┐
 │  Validator Host             │        │  Docker Sandbox (eval environment)   │
 │                             │        │                                      │
 │  Agent Harness              │  SSH/  │  Mock Services (stateful)            │
-│  (claude-code, cursor,      │  exec  │  ├── MailHog    (:1025 SMTP, :1080)  │
-│   openclaw — whitelisted)   │───────→│  ├── Notion API (:8080)              │
+│  (claude-code, openclaw,    │  exec  │  ├── MailHog    (:1025 SMTP, :1080)  │
+│   hermes — whitelisted)     │───────→│  ├── Notion API (:8080)              │
 │                             │        │  ├── Calendar   (:8081)              │
 │  Makes LLM API calls        │        │  ├── Slack API  (:8082)              │
 │  directly (validator's key) │        │  └── Gitea      (:3000, :2222)       │
@@ -160,7 +160,7 @@ The agent harness (Claude Code, Cursor, OpenClaw, etc.) runs **on the validator 
 
 **Why agent-outside, sandbox-inside:**
 
-- **Use official images.** Claude Code, Cursor, and OpenClaw all publish Docker images or binaries. No need to bundle them into a custom eval image — use the publisher's release directly.
+- **Use official images.** Claude Code, OpenClaw, and Hermes all publish Docker images or binaries. No need to bundle them into a custom eval image — use the publisher's release directly.
 - **Truly offline sandbox.** All egress is blocked, no exceptions. No LLM proxy, no firewall holes. The agent's LLM calls happen outside the sandbox on the validator host.
 - **Clean separation.** The sandbox is a workspace (mock services + files + CLI tools). The agent is a brain that operates the workspace remotely. This matches how these tools actually work in production.
 - **Transcript capture is trivial.** The validator orchestrator wraps the SSH/exec channel — every command and response is logged automatically.
@@ -271,10 +271,10 @@ harness: claude-code    # from whitelist
 | Harness | Runs on validator host | Connects to sandbox via |
 |---------|----------------------|------------------------|
 | `claude-code` | Official Claude Code Docker image | SSH → sandbox shell |
-| `cursor` | Official Cursor agent image | SSH → sandbox shell |
 | `openclaw` | Official OpenClaw image | SSH → sandbox shell |
+| `hermes` | Official Hermes image | SSH → sandbox shell |
 
-Each adapter is a thin wrapper (~5 lines) that: (1) pulls the publisher's official image, (2) passes the universal prompt + SSH credentials, (3) captures the session transcript. The agent framework handles tool execution via SSH natively — this is how Claude Code, Cursor, etc. already work with remote environments.
+Each adapter is a thin wrapper (~5 lines) that: (1) pulls the publisher's official image, (2) passes the universal prompt + SSH credentials, (3) captures the session transcript. The agent framework handles tool execution via SSH natively — this is how Claude Code, OpenClaw, Hermes, etc. already work with remote environments.
 
 **Security:** Miners control SKILL.md content only — not execution. No miner code runs on the validator host or inside the sandbox. The sandbox has all egress blocked (fully offline). The agent harness runs on the validator host using the validator's LLM API key (consistent with v4.0 — validators bear all inference costs) and SSH access to the sandbox (for tool execution). The harness container is also resource-capped and hard-timed.
 
@@ -944,7 +944,7 @@ This phase is deployable independently. Even without the Docker sandbox, LLM-gen
 - **Now:** Experiment with memory/reflection patterns in your AGENTS.md — the SKILL.md format is a strict subset. Build agents that write learnings to a file and read them on subsequent tasks.
 - **Phase 1:** No miner changes required (fixture factory is validator-side). Your existing pack continues to work.
 - **Phase 2+:** Migrate AGENTS.md → SKILL.md format. Ensure your agent works with `bash`, `curl`, and standard CLI tools (no reliance on OpenClaw-specific tool handlers). Test against mock services locally.
-- **Season 1 launch:** Declare harness in `pack.yaml`, ship SKILL.md + any supporting pack files. Your agent framework must be able to operate a remote sandbox via SSH (this is the default for Claude Code, Cursor, and OpenClaw).
+- **Season 1 launch:** Declare harness in `pack.yaml`, ship SKILL.md + any supporting pack files. Your agent framework must be able to operate a remote sandbox via SSH (this is the default for Claude Code, OpenClaw, and Hermes).
 
 ---
 
