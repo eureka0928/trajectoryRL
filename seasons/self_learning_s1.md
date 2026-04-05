@@ -1,6 +1,6 @@
 # Season 1: Self-Learning Agents
 
-> v0.12: Removed Migration Path, Roadmap, Appendix, Open Questions. Reframed two-container rationale around vanilla harness images.
+> v0.13: Validator-mandated framework rotation. Miners compete on SKILL.md quality only.
 
 ---
 
@@ -30,7 +30,7 @@ Run a sequence of tasks, judge each trajectory independently, compute the trend 
 
 2. **Agent-harness-agnostic.** The interface is: SSH into a sandbox, read SKILL.md + INSTRUCTION.md, execute. Every harness receives the same universal prompt, with no framework-specific file naming and no translation layer. The validator only sees a quality score per episode.
 
-   Miners compete on which agent framework learns best, not which prompt is cleverest. A miner running Claude Code competes directly against a miner running OpenClaw or Hermes.
+   The validator selects which agent framework runs each epoch (Claude Code, OpenClaw, Hermes), not the miner. Miners author a SKILL.md that must work across all supported frameworks. The competition is purely on instruction quality: memory strategy, safety rules, domain heuristics. A baseline like [ivangdavila/self-improving](https://clawhub.ai/ivangdavila/self-improving) shows what a minimal SKILL.md looks like. Framework rotation across epochs enforces the agnostic property and prevents miners from over-fitting to one framework's quirks.
 
 3. **Resistant to gaming.** A single scenario result can be hacked. A quality trend across 4 repetitions of the same scenario with different data is harder to fake, because:
    - Data is **different** each rep (same template, new content via validator-private salt)
@@ -196,11 +196,12 @@ Universal prompt (validator-injected, same for all miners):
   Do not modify SKILL.md.
 ```
 
-The miner declares which agent framework to use in `pack.yaml`. The validator spawns a **harness container** (from the publisher's official image) on the eval network, pointed at the sandbox:
+The **validator** selects which framework runs each epoch. Miners have no control over framework choice. At launch, all evaluations use Claude Code. Mid-season, the validator begins rotating frameworks per epoch:
 
-```yaml
-# pack.yaml (miner-provided)
-harness: claude-code    # from whitelist
+```
+epoch_framework = FRAMEWORKS[epoch_seed % len(FRAMEWORKS)]
+# Launch:      FRAMEWORKS = ["claude-code"]
+# Mid-season:  FRAMEWORKS = ["claude-code", "openclaw", "hermes"]
 ```
 
 | Harness | Container image | Connects to sandbox via |
@@ -217,7 +218,7 @@ Each adapter is a thin wrapper that: (1) pulls the publisher's official image, (
 - **Sandbox container:** All egress blocked (fully offline). Only reachable from the harness via `eval_net`. CPU/memory/disk limits.
 - **Validator container:** Only needs Docker socket access to orchestrate. No third-party images run on the host.
 
-**Whitelisted harnesses only (Season 1).** Only pre-configured adapters are allowed. New frameworks can be proposed via PR and added to the whitelist after security review. Since the harness is already containerized with restricted egress, custom harness support (`raw-bash`) becomes viable for Season 2 because the security boundary is the container, not the whitelist.
+**Whitelisted frameworks only.** Only pre-configured adapters are supported. New frameworks can be proposed via PR and added after security review. Since the harness is already containerized with restricted egress, the whitelist is a quality bar (does the adapter work?), not a security boundary.
 
 ---
 
