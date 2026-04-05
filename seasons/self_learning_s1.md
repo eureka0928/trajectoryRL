@@ -55,34 +55,34 @@ The agent operates inside a **Docker sandbox**, a prepared environment with real
 The validator spawns **two ephemeral sibling containers** per evaluation via Docker socket: one for the agent harness, one for the sandbox. Both are isolated. The validator container itself is persistent and Watchtower-managed.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────────────────┐
 │  Docker Host                                                      │
 │                                                                   │
 │  Validator Container (persistent, Watchtower-managed)             │
-│  ┌──────────────────────────────────────────────────────────┐    │
-│  │  Orchestrator · LLM Judge · Scorer                        │    │
-│  │  Spawns eval containers via Docker socket                  │    │
-│  └──────────────────────────────────────────────────────────┘    │
+│  ┌──────────────────────────────────────────────────────────┐     │
+│  │  Orchestrator · LLM Judge · Scorer                       │     │
+│  │  Spawns eval containers via Docker socket                │     │
+│  └──────────────────────────────────────────────────────────┘     │
 │                            │ docker.sock                          │
 │                            ▼                                      │
 │  Per-miner eval (ephemeral containers on isolated eval_net):      │
 │                                                                   │
-│  ┌────────────────────┐  SSH/exec  ┌────────────────────────────┐│
+│  ┌─────────────────────┐  SSH/exec ┌─────────────────────────────┐│
 │  │ Harness Container   │──────────→│ Sandbox Container           ││
 │  │                     │           │                             ││
-│  │ openclaw             │           │ Mock Services (stateful)    ││
+│  │ openclaw            │           │ Mock Services (stateful)    ││
 │  │ (Season 1)          │           │ MailHog, Notion, Calendar,  ││
 │  │                     │           │ Slack, Gitea                ││
 │  │ Egress: LLM API     │           │                             ││
 │  │ only (iptables)     │           │ /workspace/SKILL.md    (RO) ││
 │  │                     │           │ /workspace/INSTRUCTION.md   ││
-│  │ Validator's API key  │           │ /workspace/learned/ (persist)││
+│  │ Validator's API key │           │ /workspace/learned/         ││
 │  │ Resource-capped     │           │                             ││
-│  │ Hard-timed (10 min) │           │ Egress: NONE (fully offline)││
-│  └────────────────────┘           └────────────────────────────┘│
+│  │ Hard-timed (10 min) │           │ Egress: NONE                ││
+│  └─────────────────────┘           └─────────────────────────────┘│
 │                                                                   │
 │  Watchtower (manages validator image only)                        │
-└──────────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 **Three containers, three roles:**
