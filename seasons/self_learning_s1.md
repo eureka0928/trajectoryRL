@@ -1,6 +1,6 @@
 # Season 1: Self-Learning Agents
 
-> v0.11: Removed em dashes throughout for cleaner, research-paper style.
+> v0.12: Removed Migration Path, Roadmap, Appendix, Open Questions. Reframed two-container rationale around vanilla harness images.
 
 ---
 
@@ -93,9 +93,9 @@ The validator spawns **two ephemeral sibling containers** per evaluation via Doc
 | **Harness** | Ephemeral (per-episode) | `eval_net` + LLM API egress only | Publisher's official image (claude-code, openclaw, hermes) |
 | **Sandbox** | Ephemeral (per-miner, persists across episodes) | `eval_net` only, no egress | `ghcr.io/trajectoryrl/sandbox:latest` |
 
-**Why three containers (not two):**
+**Why two eval containers (harness + sandbox):**
 
-We considered merging harness + sandbox into a single container. The blocker is **egress control**: the harness needs LLM API access, the sandbox must be fully offline. Merging forces you to solve this with network namespaces or embedded proxies inside one container, which is more complex and harder to audit than two containers with different iptables rules. Additionally, merging means building custom images (harness + mock services bundled) instead of pulling official agent images. The two-container split follows the same pattern as CI systems (GitHub Actions, GitLab runners): well-understood, auditable, no custom images.
+Separating harness from sandbox keeps the harness container **vanilla**: the publisher's unmodified image (Claude Code, OpenClaw, Hermes) runs as-is, with no custom layers, no injected mock services, no patching. The miner's SKILL.md lives in the sandbox, not the harness. This means (1) the validator never builds or modifies agent images, (2) the harness is bit-for-bit identical to what the publisher ships, and (3) egress rules are trivially enforced per container: the harness gets LLM API access, the sandbox gets none. Merging the two would require bundling mock services into every agent image or solving egress partitioning inside a single container with network namespaces, both strictly more complex than running two sibling containers with different iptables rules.
 
 - **Harness is sandboxed.** The harness runs in its own container with egress restricted to the LLM API endpoint (iptables whitelist). No access to the validator host, no arbitrary internet. The validator passes its API key as an environment variable; the harness never touches the host filesystem.
 - **Sandbox is fully offline.** All egress blocked, no exceptions. No LLM proxy, no firewall holes.
@@ -744,83 +744,6 @@ Additional scenario types (Season 2+):
 
 ---
 
-## Migration Path
-
-### Phase 1: Fixture Factory (lowest risk, highest immediate value)
-
-- Build fixture generation prompts + JSON schemas for existing scenarios
-- Include web search results + memory entries in generated fixtures
-- Implement PRNG-based structural param derivation from `epoch_seed`
-- Implement validator-private salt + fixture_hash verification
-- **Test:** Generate fixtures for incident_response, compare quality to hand-crafted
-- **Deployable before sandbox.** Fixtures are just loaded differently.
-
-This phase is deployable independently. Even without the Docker sandbox, LLM-generated fixtures eliminate memorization and remove the fixture maintenance burden.
-
-### Phase 2: Sandbox Infrastructure
-
-- Build base Docker image with MailHog + lightweight mock APIs (Notion, Calendar, Slack, web, memory)
-- Load fixtures into mock services at container start
-- Implement observation capture (transcript + service logs + fs diff)
-- Port incident_response to sandbox format
-- **Test:** Run side-by-side with current eval, compare scoring agreement
-
-### Phase 3: Multi-Episode + SKILL.md
-
-- Implement episode runner with persistent workspace
-- Implement split-half delta scoring (1 scenario × 4 reps)
-- Port AGENTS.md → SKILL.md format
-- **Test:** Run 4-rep sequences, verify split-half delta signal
-
-### Phase 3b: Scenario B (mid-season)
-
-- Build code-generation fixture factory (base projects, bug injection, test suite generation)
-- Port codebase_fix to sandbox format
-- Enable per-epoch rotation (`epoch_seed % 2`)
-- **Test:** Verify fixture factory produces solvable bugs with valid test suites
-
-### Phase 4: Scoring Rewrite
-
-- Implement hybrid grading: automated checks (service state assertions) + LLM judge (qualitative rubric)
-- Automated checks verify objective criteria: file exists, email sent, tests pass, no confidential data leaked
-- LLM judge evaluates qualitative dimensions: reasoning quality, communication tone, investigation methodology
-- Weight split: incident_response 40% automated / 60% judge (codebase_fix 50/50 when added)
-- Define scoring spec YAML format mapping each criterion to check type and weight
-
-### Phase 5: Season 2 Preparation
-
-- Add new scenario types (data analysis, customer support, multi-step workflows)
-- Add error simulation (configure mock services to fail intermittently)
-- Deprecate old fixture-based mock tools
-- Update miner SDK/docs for new environment
-
----
-
-### Roadmap & MVP Definition
-
-**What ships first:** Phase 1 (Fixture Factory) is independently deployable without the Docker sandbox. This is the first deliverable.
-
-**Season 1 launch** = Phase 3 complete (1 scenario × 4 reps + SKILL.md + split-half delta scoring end-to-end).
-
-| Phase | Depends On | Status | Milestone |
-|-------|-----------|--------|-----------|
-| 1. Fixture Factory | Nothing (standalone) | Design complete | First to ship, deployable before sandbox |
-| 2. Sandbox Infrastructure | Phase 1 (fixtures load into sandbox) | Design complete | Docker sandbox with real mock services |
-| 3. Multi-Episode + SKILL.md | Phase 2 (sandbox exists) | Design complete | **Season 1 launch** (incident_response only) |
-| 3b. Scenario B | Phase 3 (episode runner exists) | Design complete | Mid-season: adds codebase_fix + rotation |
-| 4. Scoring Rewrite | Phase 3 (episodes produce trajectories) | Spec complete | Ships with Season 1 |
-| 5. Season 2 Prep | Phase 4 (scoring stable) | Planned | After Season 1 stabilizes |
-
-**How to prepare as a miner:**
-
-- **Now:** Experiment with memory/reflection patterns in your AGENTS.md. The SKILL.md format is a strict subset. Build agents that write learnings to a file and read them on subsequent tasks.
-- **Phase 1:** No miner changes required (fixture factory is validator-side). Your existing pack continues to work.
-- **Phase 2+:** Migrate AGENTS.md → SKILL.md format. Ensure your agent works with `bash`, `curl`, and standard CLI tools (no reliance on OpenClaw-specific tool handlers). Test against mock services locally.
-- **Season 1 launch:** Declare harness in `pack.yaml`, ship SKILL.md + any supporting pack files. Your agent framework must be able to operate a remote sandbox via SSH (this is the default for Claude Code, OpenClaw, and Hermes). Launch evaluates incident_response only.
-- **Mid-season:** Scenario B (codebase_fix) goes live. SKILL.md must handle both scenarios. Build general-purpose instructions, not scenario-specific hacks.
-
----
-
 ## Minimal Viable Implementation
 
 The entire system needs:
@@ -831,67 +754,3 @@ The entire system needs:
 4. **Scorer**: Compute split-half delta from the 4 scores → `final_score = mean(quality) * (1 + α * max(0, delta))` where α=0.5
 
 Four components. The judge already exists. The new work is: sandbox + episode runner.
-
----
-
-## Open Questions
-
-1. **Container startup latency**: MailHog + mock APIs + CLI tools. How fast can we boot? Target: < 5s.
-2. **Mock service fidelity**: How closely do mock APIs need to match real ones? Basic CRUD or full query filter support?
-3. **Learned memory size limit**: Cap `/workspace/learned/` to prevent unbounded growth? 100KB? 1MB?
-4. **Cross-epoch learning**: Should `/workspace/learned/` persist across epochs (24h), or reset each epoch?
-5. **Fixture generation**: Validator-private salt (recommended) vs. PRNG-only generation. Which is the Season 1 default? What's the minimum salt entropy and rotation policy?
-6. **Judge scoring rubric**: How many sub-criteria per scenario? More criteria = finer signal but higher judge cost. Structured rubric (binary per criterion) vs. holistic numeric score?
-7. **Judge consistency across validators**: Same trajectory may get different scores from different validators' judge calls. Median-of-validators? Or deterministic judge (structured rubric)?
-
----
-
-## Appendix
-
-### A. Problems with v4.0 (motivation for Season 1)
-
-1. **Stateless mock tools.** Tools don't reflect mutations: agent sends email but `himalaya envelope list` still returns the original inbox. We can only score intent, not competence at state transitions. Multi-step workflows where step 2 depends on step 1 are fundamentally untestable.
-
-2. **`exec` is a god-function with brittle regex.** The exec handler is a ~170-line chain of regex patterns covering 4 systems (email, tasks, calendar, GitHub). Command variation kills agents (`himalaya envelope list` works, `himalaya list envelope` doesn't). Creative agents that use `curl` directly are punished. This creates a narrow corridor of "correct" commands that rewards memorization over capability.
-
-3. **Fixture-scenario tight coupling.** Each scenario has manually crafted fixture files. No composability, no parameterized variation, slow to add new scenarios.
-
-4. **Single-turn, single-episode limitation.** No approval flows, clarification dialogues, or long-running tasks. No incentive for multi-turn interactions.
-
-5. **No error simulation.** Tools always succeed. No rate limits, auth failures, timeouts. Can't evaluate robustness.
-
-6. **Knowledge-worker monoculture.** All 7 scenarios are office-worker email/calendar/tasks/Slack.
-
-7. **Fixed fixture pool enables memorization.** Open-source fixtures + 7 static scenarios = miners memorize the benchmark. Optimization-through-memorization is structurally indistinguishable from genuine capability.
-
-8. **No self-learning evaluation.** The system evaluates a single snapshot. No mechanism to test whether an agent improves across tasks, retains corrections, or transfers learnings.
-
-### B. What Season 1 changes (compared to v4.0)
-
-| Dimension | v4.0 | Season 1 |
-|-----------|------|----------|
-| Environment | Regex mock handlers, static fixtures | Docker sandbox, stateful mock services |
-| Scoring | Regex + LLM judge (binary gate) | State-based + LLM judge (continuous 0.0–1.0) |
-| Data | 7 fixed scenarios, static fixtures | Procedurally generated fixtures per eval |
-| Episodes | 1 per scenario | 4 reps of same scenario (split-half delta) |
-| Learning | None (stateless) | Persistent `/workspace/learned/` across reps |
-| Pack format | AGENTS.md | SKILL.md (static, agent-agnostic) |
-| Interface | OpenClaw API → regex handler | SSH into Docker → real shell + real protocols |
-| Gaming surface | Memorize fixtures, reverse-engineer regexes | Procedural data, hybrid grading, LLM judge |
-
-### C. v4.0 cost baseline (live data)
-
-For reference, the current v4.0 eval costs per miner (GLM-5 via OpenRouter, 21 qualified miners):
-
-| Scenario | Mean Cost | Mean Tokens | Mean LLM Calls |
-|----------|----------|-------------|----------------|
-| inbox_triage | $0.021 | 17.6K | 3.1 |
-| client_escalation | $0.022 | 16.7K | 2.3 |
-| team_standup | $0.024 | 18.7K | 2.2 |
-| morning_brief | $0.028 | 19.9K | 2.2 |
-| inbox_to_action | $0.032 | 21.8K | 2.5 |
-| hiring_debrief | $0.039 | 30.8K | 3.4 |
-| post_incident_review | $0.104 | 90.3K | 7.4 |
-| **Per-miner total** | **$0.27** | **216K** | **23** |
-
-Full v4.0 epoch: 21 qualified miners × $0.27 = ~$5.67. Season 1 projection is ~30× higher (~$174/epoch at 50 miners) due to deeper episodes (10-min timeout, 4 reps).
