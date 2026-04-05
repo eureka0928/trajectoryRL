@@ -509,7 +509,7 @@ Using the LLM judge as the quality signal eliminates a class of gaming strategie
 
 ## Incentive Mechanism: Season 1 Amendment
 
-Season 1 amends the base incentive mechanism (INCENTIVE_MECHANISM.md v4.2) by replacing **cost-based competition** with **quality-based competition**. The structural machinery is unchanged: Winner-Take-All, Winner Protection, NCD, consensus aggregation, inactivity rules. Only the competition metric and its direction change. The subnet is already bootstrapped (>=10 active miners), so bootstrap rules do not apply.
+Season 1 amends [INCENTIVE_MECHANISM.md](INCENTIVE_MECHANISM.md) v4.2 by replacing **cost-based competition** with **quality-based competition**. All structural machinery is inherited unchanged. Only the competition metric and its direction change.
 
 ### What changes
 
@@ -523,72 +523,7 @@ Season 1 amends the base incentive mechanism (INCENTIVE_MECHANISM.md v4.2) by re
 | **Pack format** | PolicyBundle (AGENTS.md + tool_policy) | SKILL.md (domain instructions) |
 | **NCD target** | AGENTS.md content | SKILL.md content |
 
-### What does not change
-
-- **Winner-Take-All.** The subnet is already bootstrapped (>=10 active miners). Winner gets 100%, ranked by highest `final_score` instead of lowest cost.
-- **NCD pack similarity detection.** Pairwise comparison among all active miners' SKILL.md files. Similarity >= 0.80 (NCD threshold): later submitter (higher `block_number`) excluded. First mover preserved.
-- **Consensus aggregation.** Each validator computes `final_score` independently (different fixture data via private salt). Consensus score = stake-weighted average across reporting validators: `consensus_score[miner] = Σ(stake_i × score_i) / Σ(stake_i)`.
-- **Inactivity rules.** Same 14400-block (~48h) window. Inactive miners lose winner protection and receive weight 0.
-- **Evaluation cadence.** Epoch (~24h / 7200 blocks) for evaluation, tempo (~72min / 360 blocks) for weight setting.
-- **Always set weights.** Validators always call `set_weights` every tempo. No qualified miners = all weight to subnet owner UID (burned).
-
-### Winner Protection (Score-Based)
-
-Direction flips from cost (lower is better) to score (higher is better). The multiplicative threshold stays at δ=0.10:
-
-```
-challenger_score > winner_score × (1 + δ)
-```
-
-The challenger must score at least 10% higher than the winner's recorded score to dethrone them. Winner self-update follows the same rule: if the winner's new consensus score > `winner_score × (1 + δ)`, their defense strengthens.
-
-**Example:**
-```
-Epoch 1: Miner A (consensus_score: 0.72)
-  → First qualified miner, winner_score = 0.72
-
-Epoch 2: Miner B (consensus_score: 0.76)
-  → Rejected. Must beat 0.72 × 1.10 = 0.792
-
-Epoch 3: Miner C (consensus_score: 0.85)
-  → New winner. 0.85 > 0.792. winner_score = 0.85
-
-Epoch 4: Miner D (consensus_score: 0.90)
-  → Rejected. Must beat 0.85 × 1.10 = 0.935
-
-Epoch 5: Winner C improves (consensus_score: 0.95)
-  → 0.95 > 0.85 × 1.10 = 0.935 → C self-updates
-  → winner_score = 0.95, defense stronger
-```
-
-**Why multiplicative still works for scores.** The `final_score` range is bounded but not fixed (theoretical max ~1.5 with perfect quality and maximal delta). A 10% multiplicative threshold means challengers must demonstrate genuinely better SKILL.md quality, not just benefit from judge variance. At scores near 0.9, the threshold requires +0.09; at scores near 0.5, it requires +0.05. This scales naturally with competitive pressure.
-
-### Validator Local State
-
-Each validator persists:
-```
-WinnerState:
-  winner_hotkey    — current winner's hotkey
-  winner_pack_hash — SKILL.md hash when they won
-  winner_score     — consensus final_score when they won
-  scoring_version  — resets winner state on season/version change
-```
-
-### Weight Setting
-
-```python
-# Per tempo (every 360 blocks):
-# Winner-take-all (subnet is bootstrapped, >=10 active miners)
-weight[winner] = 1.0   # highest consensus final_score
-weight[others] = 0.0
-
-# NCD filter applied before ranking:
-# pairwise SKILL.md comparison, later submitter excluded if similarity >= 0.80
-```
-
-### Why generalize instead of replacing
-
-The v4.0 incentive mechanism is battle-tested infrastructure: consensus protocol, winner protection, NCD dedup, inactivity handling. Season 1 changes only the metric (cost to quality) and its direction (lower-wins to higher-wins). When Season 1 ends, the mechanism reverts to cost-based competition (or a hybrid) without structural changes. Future seasons can define their own metric within the same framework.
+Winner Protection flips direction: `challenger_score > winner_score × (1 + δ)` where δ=0.10. Self-update follows the same rule. Everything else (WTA, NCD threshold 0.80, consensus aggregation, inactivity 14400 blocks, evaluation cadence, weight setting) works identically to v4.2. See [INCENTIVE_MECHANISM.md](INCENTIVE_MECHANISM.md) for the full specification.
 
 ---
 
