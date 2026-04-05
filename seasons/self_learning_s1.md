@@ -1,6 +1,6 @@
 # Season 1: Self-Learning Agents
 
-> v0.14: Cross-validator fixture variation reframed as Monte Carlo sampling via consensus aggregation.
+> v0.16: OpenClaw as Season 1 framework, incentive mechanism amendment (quality-based WTA/NCD/Winner Protection).
 
 ---
 
@@ -30,7 +30,7 @@ Run a sequence of tasks, judge each trajectory independently, compute the trend 
 
 2. **Agent-harness-agnostic.** The interface is: SSH into a sandbox, read SKILL.md + INSTRUCTION.md, execute. Every harness receives the same universal prompt, with no framework-specific file naming and no translation layer. The validator only sees a quality score per episode.
 
-   The validator selects which agent framework runs each epoch (Claude Code, OpenClaw, Hermes), not the miner. Miners author a SKILL.md that must work across all supported frameworks. The competition is purely on instruction quality: memory strategy, safety rules, domain heuristics. A baseline like [ivangdavila/self-improving](https://clawhub.ai/ivangdavila/self-improving) shows what a minimal SKILL.md looks like. Framework rotation across epochs enforces the agnostic property and prevents miners from over-fitting to one framework's quirks.
+   Season 1 launches with **OpenClaw** as the sole agent framework. The architecture is framework-agnostic by design: any harness that can operate a shell via SSH works (Claude Code, Hermes, custom agents). Miners author a SKILL.md containing domain knowledge, safety rules, and memory strategy. The competition is purely on instruction quality. A baseline like [ivangdavila/self-improving](https://clawhub.ai/ivangdavila/self-improving) shows what a minimal SKILL.md looks like. Future seasons can introduce framework rotation across epochs to enforce generality.
 
 3. **Resistant to gaming.** A single scenario result can be hacked. A quality trend across 4 repetitions of the same scenario with different data is harder to fake, because:
    - Data is **different** each rep (same template, new content via validator-private salt)
@@ -70,8 +70,8 @@ The validator spawns **two ephemeral sibling containers** per evaluation via Doc
 │  ┌────────────────────┐  SSH/exec  ┌────────────────────────────┐│
 │  │ Harness Container   │──────────→│ Sandbox Container           ││
 │  │                     │           │                             ││
-│  │ claude-code /       │           │ Mock Services (stateful)    ││
-│  │ openclaw / hermes   │           │ MailHog, Notion, Calendar,  ││
+│  │ openclaw             │           │ Mock Services (stateful)    ││
+│  │ (Season 1)          │           │ MailHog, Notion, Calendar,  ││
 │  │                     │           │ Slack, Gitea                ││
 │  │ Egress: LLM API     │           │                             ││
 │  │ only (iptables)     │           │ /workspace/SKILL.md    (RO) ││
@@ -90,18 +90,18 @@ The validator spawns **two ephemeral sibling containers** per evaluation via Doc
 | Container | Lifecycle | Network | Image |
 |-----------|-----------|---------|-------|
 | **Validator** | Persistent, Watchtower-managed | Host network | `ghcr.io/trajectoryrl/trajectoryrl:latest` |
-| **Harness** | Ephemeral (per-episode) | `eval_net` + LLM API egress only | Publisher's official image (claude-code, openclaw, hermes) |
+| **Harness** | Ephemeral (per-episode) | `eval_net` + LLM API egress only | Publisher's official image (OpenClaw for Season 1) |
 | **Sandbox** | Ephemeral (per-miner, persists across episodes) | `eval_net` only, no egress | `ghcr.io/trajectoryrl/sandbox:latest` |
 
 **Why two eval containers (harness + sandbox):**
 
-Separating harness from sandbox keeps the harness container **vanilla**: the publisher's unmodified image (Claude Code, OpenClaw, Hermes) runs as-is, with no custom layers, no injected mock services, no patching. The miner's SKILL.md lives in the sandbox, not the harness. This means (1) the validator never builds or modifies agent images, (2) the harness is bit-for-bit identical to what the publisher ships, and (3) egress rules are trivially enforced per container: the harness gets LLM API access, the sandbox gets none. Merging the two would require bundling mock services into every agent image or solving egress partitioning inside a single container with network namespaces, both strictly more complex than running two sibling containers with different iptables rules.
+Separating harness from sandbox keeps the harness container **vanilla**: the publisher's unmodified image (OpenClaw for Season 1) runs as-is, with no custom layers, no injected mock services, no patching. The miner's SKILL.md lives in the sandbox, not the harness. This means (1) the validator never builds or modifies agent images, (2) the harness is bit-for-bit identical to what the publisher ships, and (3) egress rules are trivially enforced per container: the harness gets LLM API access, the sandbox gets none. Merging the two would require bundling mock services into every agent image or solving egress partitioning inside a single container with network namespaces, both strictly more complex than running two sibling containers with different iptables rules.
 
 - **Harness is sandboxed.** The harness runs in its own container with egress restricted to the LLM API endpoint (iptables whitelist). No access to the validator host, no arbitrary internet. The validator passes its API key as an environment variable; the harness never touches the host filesystem.
 - **Sandbox is fully offline.** All egress blocked, no exceptions. No LLM proxy, no firewall holes.
 - **Validator stays clean.** No third-party images run on the host. The validator only needs Docker socket access to spawn sibling containers.
 - **Watchtower unchanged.** It manages the validator image. Eval containers are ephemeral and unlabeled, so Watchtower ignores them.
-- **Official images.** Claude Code, OpenClaw, and Hermes publish Docker images. The validator pulls them once and spawns instances per-eval. No custom bundled images to maintain.
+- **Official images.** Season 1 uses the official OpenClaw Docker image. The validator pulls it once and spawns instances per-eval. No custom bundled images to maintain. Future seasons can add Claude Code, Hermes, or other frameworks by adding adapters.
 - **Transcript capture.** The validator creates the Docker network and captures the harness container's stdout/stderr + SSH session logs.
 
 ### Universal Interface: Shell + Filesystem + HTTP
@@ -116,7 +116,7 @@ The agent framework connects to the sandbox via SSH (or `docker exec`) and has a
 
 Any method that speaks the protocol works: `curl localhost:1080/api/v2/messages`, `python3 -c "import smtplib; ..."`, or raw socket connections. The mock services expose **standard protocols**, not framework-specific APIs.
 
-**Key point:** The sandbox is tool-agnostic. It doesn't know or care which agent framework is operating it. It exposes standard protocols and inspects final state. A Claude Code agent and a custom Python harness are evaluated identically: both SSH in and run commands.
+**Key point:** The sandbox is tool-agnostic. It doesn't know or care which agent framework is operating it. It exposes standard protocols and inspects final state. An OpenClaw agent and a custom Python harness are evaluated identically: both SSH in and run commands.
 
 ### Container Lifecycle
 
@@ -196,29 +196,15 @@ Universal prompt (validator-injected, same for all miners):
   Do not modify SKILL.md.
 ```
 
-The **validator** selects which framework runs each epoch. Miners have no control over framework choice. At launch, all evaluations use Claude Code. Mid-season, the validator begins rotating frameworks per epoch:
+**Season 1 framework: OpenClaw.** All evaluations use the official OpenClaw Docker image. The adapter is a thin wrapper that: (1) pulls the publisher's official image, (2) spawns a container on `eval_net` with the universal prompt + SSH credentials as env vars, (3) captures stdout/stderr when the container exits. OpenClaw handles tool execution via SSH natively.
 
-```
-epoch_framework = FRAMEWORKS[epoch_seed % len(FRAMEWORKS)]
-# Launch:      FRAMEWORKS = ["claude-code"]
-# Mid-season:  FRAMEWORKS = ["claude-code", "openclaw", "hermes"]
-```
-
-| Harness | Container image | Connects to sandbox via |
-|---------|----------------|------------------------|
-| `claude-code` | Official Claude Code Docker image | SSH → sandbox shell |
-| `openclaw` | Official OpenClaw image | SSH → sandbox shell |
-| `hermes` | Official Hermes image | SSH → sandbox shell |
-
-Each adapter is a thin wrapper that: (1) pulls the publisher's official image, (2) spawns a container on `eval_net` with the universal prompt + SSH credentials as env vars, (3) captures stdout/stderr when the container exits. The agent framework handles tool execution via SSH natively.
+The architecture supports any framework that can operate a shell via SSH. Adding a new framework requires only a new adapter (image name + launch config). Future seasons can introduce framework rotation (`epoch_framework = FRAMEWORKS[epoch_seed % len(FRAMEWORKS)]`) to enforce SKILL.md generality across frameworks.
 
 **Security:** Miners control SKILL.md content only, not execution. No miner code runs on the validator host. Both the harness and sandbox run in isolated containers:
 
 - **Harness container:** Egress restricted to the LLM API endpoint only (iptables whitelist). Receives the validator's API key as an env var. Resource-capped, hard-timed (10 min). Cannot reach the validator container or host filesystem.
 - **Sandbox container:** All egress blocked (fully offline). Only reachable from the harness via `eval_net`. CPU/memory/disk limits.
 - **Validator container:** Only needs Docker socket access to orchestrate. No third-party images run on the host.
-
-**Whitelisted frameworks only.** Only pre-configured adapters are supported. New frameworks can be proposed via PR and added after security review. Since the harness is already containerized with restricted egress, the whitelist is a quality bar (does the adapter work?), not a security boundary.
 
 ---
 
@@ -518,6 +504,91 @@ A successful gaming strategy would need to defeat all three simultaneously.
 Using the LLM judge as the quality signal eliminates a class of gaming strategies that cost-based scoring is vulnerable to. A miner cannot trick a judge into seeing quality improvement: each episode is scored independently against the same rubric, and the learning trend is computed from those scores by a deterministic formula.
 
 **What miners must actually build:** A SKILL.md that teaches the agent to reflect after each task, identify effective patterns, store them compactly, and retrieve them in new contexts. This is an agent engineering problem, not a benchmark optimization problem.
+
+---
+
+## Incentive Mechanism: Season 1 Amendment
+
+Season 1 amends the base incentive mechanism (INCENTIVE_MECHANISM.md v4.2) by replacing **cost-based competition** with **quality-based competition**. The structural machinery is unchanged: Winner-Take-All, Winner Protection, NCD, consensus aggregation, inactivity rules. Only the competition metric and its direction change. The subnet is already bootstrapped (>=10 active miners), so bootstrap rules do not apply.
+
+### What changes
+
+| Component | v4.0 (cost-based) | Season 1 (quality-based) |
+|-----------|-------------------|--------------------------|
+| **Competition metric** | `consensus_cost` (lower wins) | `final_score` (higher wins) |
+| **Winner selection** | Lowest cost among qualified | Highest `final_score` |
+| **Qualification gate** | All safety + correctness pass | `final_score > 0` (any non-zero quality) |
+| **Winner Protection** | `challenger_cost < winner_cost × (1 - δ)` | `challenger_score > winner_score × (1 + δ)` |
+| **Winner self-update** | Lower own winning cost | Raise own winning score |
+| **Pack format** | PolicyBundle (AGENTS.md + tool_policy) | SKILL.md (domain instructions) |
+| **NCD target** | AGENTS.md content | SKILL.md content |
+
+### What does not change
+
+- **Winner-Take-All.** The subnet is already bootstrapped (>=10 active miners). Winner gets 100%, ranked by highest `final_score` instead of lowest cost.
+- **NCD pack similarity detection.** Pairwise comparison among all active miners' SKILL.md files. Similarity >= 0.80 (NCD threshold): later submitter (higher `block_number`) excluded. First mover preserved.
+- **Consensus aggregation.** Each validator computes `final_score` independently (different fixture data via private salt). Consensus score = stake-weighted average across reporting validators: `consensus_score[miner] = Σ(stake_i × score_i) / Σ(stake_i)`.
+- **Inactivity rules.** Same 14400-block (~48h) window. Inactive miners lose winner protection and receive weight 0.
+- **Evaluation cadence.** Epoch (~24h / 7200 blocks) for evaluation, tempo (~72min / 360 blocks) for weight setting.
+- **Always set weights.** Validators always call `set_weights` every tempo. No qualified miners = all weight to subnet owner UID (burned).
+
+### Winner Protection (Score-Based)
+
+Direction flips from cost (lower is better) to score (higher is better). The multiplicative threshold stays at δ=0.10:
+
+```
+challenger_score > winner_score × (1 + δ)
+```
+
+The challenger must score at least 10% higher than the winner's recorded score to dethrone them. Winner self-update follows the same rule: if the winner's new consensus score > `winner_score × (1 + δ)`, their defense strengthens.
+
+**Example:**
+```
+Epoch 1: Miner A (consensus_score: 0.72)
+  → First qualified miner, winner_score = 0.72
+
+Epoch 2: Miner B (consensus_score: 0.76)
+  → Rejected. Must beat 0.72 × 1.10 = 0.792
+
+Epoch 3: Miner C (consensus_score: 0.85)
+  → New winner. 0.85 > 0.792. winner_score = 0.85
+
+Epoch 4: Miner D (consensus_score: 0.90)
+  → Rejected. Must beat 0.85 × 1.10 = 0.935
+
+Epoch 5: Winner C improves (consensus_score: 0.95)
+  → 0.95 > 0.85 × 1.10 = 0.935 → C self-updates
+  → winner_score = 0.95, defense stronger
+```
+
+**Why multiplicative still works for scores.** The `final_score` range is bounded but not fixed (theoretical max ~1.5 with perfect quality and maximal delta). A 10% multiplicative threshold means challengers must demonstrate genuinely better SKILL.md quality, not just benefit from judge variance. At scores near 0.9, the threshold requires +0.09; at scores near 0.5, it requires +0.05. This scales naturally with competitive pressure.
+
+### Validator Local State
+
+Each validator persists:
+```
+WinnerState:
+  winner_hotkey    — current winner's hotkey
+  winner_pack_hash — SKILL.md hash when they won
+  winner_score     — consensus final_score when they won
+  scoring_version  — resets winner state on season/version change
+```
+
+### Weight Setting
+
+```python
+# Per tempo (every 360 blocks):
+# Winner-take-all (subnet is bootstrapped, >=10 active miners)
+weight[winner] = 1.0   # highest consensus final_score
+weight[others] = 0.0
+
+# NCD filter applied before ranking:
+# pairwise SKILL.md comparison, later submitter excluded if similarity >= 0.80
+```
+
+### Why generalize instead of replacing
+
+The v4.0 incentive mechanism is battle-tested infrastructure: consensus protocol, winner protection, NCD dedup, inactivity handling. Season 1 changes only the metric (cost to quality) and its direction (lower-wins to higher-wins). When Season 1 ends, the mechanism reverts to cost-based competition (or a hybrid) without structural changes. Future seasons can define their own metric within the same framework.
 
 ---
 
