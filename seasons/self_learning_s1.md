@@ -1,12 +1,12 @@
 # Season 1: Self-Learning Agents
 
-> v0.9 — Restructured as standalone proposal (history moved to appendix). Single launch scenario (incident_response), codebase_fix mid-season. Three-container architecture. Split-half delta scoring (α=0.5).
+> v0.10 — Polished scoring language: judge scores each episode independently, scorer computes trend from those scores.
 
 ---
 
 ## Design Principles
 
-The evaluation uses a single mechanism: **the LLM judge.**
+The evaluation produces a single signal: **quality per episode, scored by an LLM judge.**
 
 ```
 Quality (judge score)
@@ -19,14 +19,14 @@ Quality (judge score)
   +----------------------→ Episode
   1  2  3  4  5  ... N
 
-Score = the upward trend. Steeper = faster learner.
+Each dot = one independent judge score. The upward trend is the learning signal.
 ```
 
-Run a sequence of tasks, judge each trajectory, score the trend. An agent that learns produces higher-quality trajectories over time.
+Run a sequence of tasks, judge each trajectory independently, compute the trend from those scores. An agent that learns produces higher-quality trajectories over time.
 
 **Key properties:**
 
-1. **Single mechanism.** The LLM judge scores trajectories — same approach across any task type, any domain, any agent framework. No custom scoring infrastructure needed.
+1. **Single mechanism.** The LLM judge scores each episode independently — same approach across any task type, any domain, any agent framework. No custom scoring infrastructure needed. The judge never sees other episodes; the trend emerges from the scores alone.
 
 2. **Agent-harness-agnostic.** The interface is: SSH into a sandbox, read SKILL.md + INSTRUCTION.md, execute. Every harness receives the same universal prompt — no framework-specific file naming, no translation layer. The validator only sees a quality score per episode.
 
@@ -133,7 +133,7 @@ Per-miner evaluation (validator orchestrates via docker.sock):
        - egress: LLM API endpoint only (iptables whitelist)
     b. Harness SSHes into sandbox, reads SKILL.md + INSTRUCTION.md, does task
     c. Harness container stops → validator captures logs
-    d. Validator scores episode (LLM judge)
+    d. LLM judge scores this episode independently (0.0–1.0)
     e. Reset sandbox mock services with new fixtures
     f. /workspace/learned/ persists across episodes
 
@@ -344,13 +344,15 @@ This prevents pre-computation: the `epoch_seed` is public but the `validator_sal
 
 ---
 
-## Scoring: LLM Judge
+## Scoring
 
-### Per-Episode: LLM Judge Evaluation
+Two steps: (1) the LLM judge scores each episode independently, (2) a formula computes the learning signal from those scores.
 
-The LLM judge receives the shell transcript and mock service state, evaluates against scenario criteria. It produces a quality score per episode (0.0–1.0) covering correctness, completeness, and safety. State-based checks (mock service inspection) serve as grounding evidence for the judge — not as the scoring mechanism itself.
+### Step 1: Per-Episode Judge (Independent)
 
-### Across Episodes: Learning Signal (Split-Half Delta)
+The LLM judge receives the shell transcript and mock service state for **one episode**, evaluates against scenario criteria, and produces a quality score (0.0–1.0) covering correctness, completeness, and safety. Each judge call is isolated — it never sees transcripts or scores from other episodes. State-based checks (mock service inspection) serve as grounding evidence for the judge — not as the scoring mechanism itself.
+
+### Step 2: Learning Signal (Split-Half Delta)
 
 With 4 repetitions of the same scenario, the learning signal is a **split-half comparison**: mean quality of the last 2 reps vs. the first 2 reps. Two-point averaging on each side makes the delta robust to single-episode judge variance.
 
@@ -403,9 +405,9 @@ Quality dominates, but learning meaningfully contributes. A maximal delta of 1.0
    d. Spawn harness container on eval_net, connected to sandbox via SSH
    e. Agent runs: reads SKILL.md + learned/ + INSTRUCTION.md → does task → writes to learned/
    f. Capture: SSH transcript + LLM usage + mock service state
-   g. Judge: hybrid grading — automated checks + LLM judge → quality score (0.0–1.0)
+   g. LLM judge scores this episode independently → quality score (0.0–1.0)
 5. Tear down sandbox
-6. Score:
+6. Compute (from the 4 independent judge scores):
    - Split-half delta: mean(q3, q4) - mean(q1, q2)
    - final_score = mean(quality) * (1 + 0.5 * max(0, delta))
 7. Publish: (validator_salt, fixture_hash, scores) for auditability
@@ -509,7 +511,7 @@ Three mechanisms work together:
 
 A successful gaming strategy would need to defeat all three simultaneously.
 
-Using the LLM judge as the sole scoring mechanism eliminates a class of gaming strategies that cost-based scoring is vulnerable to. A miner cannot trick a judge into seeing quality improvement — the judge evaluates the actual trajectory outcome, not a proxy metric.
+Using the LLM judge as the quality signal eliminates a class of gaming strategies that cost-based scoring is vulnerable to. A miner cannot trick a judge into seeing quality improvement — each episode is scored independently against the same rubric, and the learning trend is computed from those scores by a deterministic formula.
 
 **What miners must actually build:** A SKILL.md that teaches the agent to reflect after each task, identify effective patterns, store them compactly, and retrieve them in new contexts. This is an agent engineering problem, not a benchmark optimization problem.
 
@@ -825,8 +827,8 @@ The entire system needs:
 
 1. **Sandbox**: Docker + mock services + SKILL.md mount
 2. **Episode runner**: Loop that resets data, delivers prompt, captures transcript
-3. **LLM judge**: Score each trajectory 0.0–1.0
-4. **Scorer**: Split-half delta → `final_score = mean(quality) * (1 + α * max(0, delta))` where α=0.5
+3. **LLM judge**: Score each episode independently 0.0–1.0 (never sees other episodes)
+4. **Scorer**: Compute split-half delta from the 4 scores → `final_score = mean(quality) * (1 + α * max(0, delta))` where α=0.5
 
 Four components. The judge already exists. The new work is: sandbox + episode runner.
 
