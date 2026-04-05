@@ -40,7 +40,7 @@ TrajectoryRL is a Bittensor subnet where miners compete to optimize AI agent pol
 - **Two-phase evaluation** — [ClawBench](https://github.com/trajectoryRL/clawbench) scenarios with fixed fixtures; LLM-as-judge scores trajectories against natural-language criteria (Phase 1: pack integrity, Phase 2: trajectory quality)
 - **Content-addressed** — Packs identified by SHA256 hash, verified against on-chain commitment
 - **Winner-take-all** — Best miner gets 100% of rewards; first-mover advantage protects early innovators
-- **Anti-copy** — On-chain block timestamps + NCD similarity detection + first-mover threshold (delta=0.05)
+- **Anti-copy** — On-chain block timestamps + NCD similarity detection + first-mover threshold (delta=0.10)
 
 See [INCENTIVE_MECHANISM.md](INCENTIVE_MECHANISM.md) for full scoring, rewards, and anti-gaming details.
 
