@@ -222,7 +222,7 @@ TrajectoryRL is a skill factory: miners compete every epoch to produce policy pa
 pip install trajrl
 ```
 
-One install gives any human or AI agent (Claude Code, Cursor, Codex, …) access to every skill the subnet has shipped. Each skill is a self-contained `SKILL.md` that agents can discover and follow directly. CLI output is JSON when piped, Rich tables when interactive.
+One install gives any human or AI agent (Claude Code, Cursor, Codex, OpenClaw, Hermes, Manus, …) access to every skill the subnet has shipped. Each skill is a self-contained `SKILL.md` that agents can discover and follow directly. CLI output is JSON when piped, Rich tables when interactive.
 
 ```bash
 trajrl subnet status                       # Network overview
