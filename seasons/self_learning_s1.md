@@ -1,5 +1,6 @@
 # Season 1: Self-Learning Agents
 
+> v0.17: chained continuity across 4 reps (shared world + recurring element on rep 3 + evolving fact on rep 4) so the split-half delta measures real cross-episode memory, not just meta-pattern transfer. Addresses community feedback in PR #157 §2a.
 > v0.16: OpenClaw as Season 1 framework, incentive mechanism amendment (quality-based WTA/NCD/Winner Protection).
 
 ---
@@ -458,7 +459,41 @@ Learning signal = split-half delta: `mean(q3, q4) - mean(q1, q2)`. Two-point ave
 
 - **Fixed N=4**: predictable eval time, no randomization overhead
 - **4 reps same scenario**: robust split-half delta signal
-- **Different data each rep**: same scenario template, completely different content (via validator-private salt + rep index)
+- **Shared world, varying incidents**: all 4 reps generate from a single `world_seed` (personas, service names, repo, team roster are stable across the epoch). Surface content (specific incidents, email subjects, bug details) varies per rep. See *Chained Continuity* below.
+
+### Chained Continuity Across Reps
+
+A naive 4-rep design where every rep is an i.i.d. sample from the fixture template only rewards *meta-pattern* learning ("always scan for confidential markers"). A static, well-written SKILL.md scores identically to a genuinely-learning agent because nothing in rep N is *causally* required for rep N+1.
+
+Season 1 closes this gap by planting two structural elements in the fixture sequence:
+
+1. **Recurring element (rep 3 ↔ rep 1).** Rep 3's fixture deliberately reuses a structural signature from rep 1 — same upstream service outage, same confidential-topic trap, same PR author, same client. Specifics differ (different timestamps, different error strings, different ticket IDs) but the underlying *pattern* is identical. An agent that wrote the rep-1 resolution to `/workspace/learned/` short-circuits discovery on rep 3; an agent without persisted memory re-derives the same answer at full cost and produces a noisier trajectory.
+
+2. **Evolving fact (rep 4).** Rep 4 introduces a fact that contradicts a detail established in rep 1 or 2 — e.g. "the team moved standup from 9am to 10am", "Dana now prefers 'Thanks' over 'Best regards'", "the on-call rotation handed off to Priya". An agent that blindly replays stale `/workspace/learned/` entries gets it wrong. An agent whose SKILL.md describes timestamping, supersession, or recency-weighted retrieval gets it right. This rewards learning *architecture*, not just learning *occurrence*.
+
+```python
+# Fixture seed derivation (replaces independent per-rep seeds)
+world_seed   = sha256(epoch_seed || validator_salt)              # personas, services, repo
+rep_seeds    = [sha256(world_seed || i) for i in range(4)]       # incident specifics per rep
+rep_3_seed   = derive_recurrence(rep_seeds[2], from_rep=rep_seeds[0])  # reuse rep-1 pattern
+rep_4_seed   = derive_evolution(rep_seeds[3], contradicts=world_seed)  # plant evolving fact
+```
+
+Scenario templates declare these via two new fields:
+
+```yaml
+fixture_generation:
+  world_scope:        [personas, service_names, repo, team_roster]   # stable across reps
+  rep_scope:          [incident_details, email_subjects, timestamps] # varies per rep
+  recur_from_rep:     {target_rep: 3, source_rep: 1, element: "outage_signature"}
+  evolve_fact:        {target_rep: 4, fact: "standup_time", from_world: true}
+```
+
+**Why this preserves split-half delta.** Reps 1–2 measure cold-start quality on the shared world. Reps 3–4 measure quality *given that the agent has had two prior interactions in this world*. The delta `mean(q3, q4) − mean(q1, q2)` now captures both meta-pattern transfer (as before) *and* direct cross-episode memory use, without changing the formula. Anti-sandbagging (early-mean floor) still applies unchanged.
+
+**Why this is not memorization.** The recurring element on rep 3 is structural, not literal: the agent cannot pre-compute rep 3 from rep 1 because the surface details still vary, and the world itself is generated from the validator's private salt. The only way to win is to extract the *pattern* during rep 1 and store it in a form retrievable on rep 3 — which is exactly the agent-engineering problem Season 1 wants to reward.
+
+
 
 ---
 
@@ -666,10 +701,11 @@ The task prompt (delivered via INSTRUCTION.md) is:
 
 #### Why it rewards learning (4 reps)
 
-- **Rep 1:** Agent processes emails sequentially, misses the correlation between monitoring alert and client complaint, may accidentally include confidential details, sends generic client email, forgets calendar invite.
-- **Rep 2:** Agent catches some patterns (e.g. "check Gitea before posting status") but may still miss confidential data traps or send a vague client email.
-- **Reps 3-4:** Agent has accumulated patterns: "scan for confidential markers before any public output", "structured incident template for Slack", "include PR authors in post-incident invite." Quality measurably higher than reps 1-2.
-- **Procedural variation:** Each rep generates different email subjects, sender names, service names, client names, confidential topics, bug descriptions. The patterns transfer; the specifics don't.
+- **Rep 1 (cold start):** Agent processes emails sequentially, misses the correlation between monitoring alert and client complaint, may accidentally include confidential details, sends generic client email, forgets calendar invite. Discovers that `payments-api` outages require routing through the finance-team manual workaround.
+- **Rep 2 (new incident, same world):** Different incident in the same company. Agent catches some meta-patterns ("check Gitea before posting status") but may still miss confidential data traps.
+- **Rep 3 (recurrence of rep 1's pattern):** A new `payments-api` outage with different specifics (different error, different affected client). An agent that wrote the workaround to `/workspace/learned/` resolves it in a fraction of the tool calls. An agent without persisted memory re-derives it from scratch and produces a noisier trajectory the judge will score lower.
+- **Rep 4 (evolving fact):** Same world, but the on-call rotation has handed off (or the standup time has shifted, or a sender preference has been corrected). An agent that timestamps and supersedes its learned entries gets it right; one that blindly replays stale state gets it wrong.
+- **Procedural variation:** Personas, service names, repo, and team roster are stable across the 4 reps (the agent is operating in *one* company across the epoch). Incident specifics, email subjects, timestamps, and bug details vary per rep. Patterns and persisted facts transfer; surface details don't.
 
 ---
 
