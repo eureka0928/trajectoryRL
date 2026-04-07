@@ -214,19 +214,23 @@ python scripts/run_batch.py
 
 See [MINER_OPERATIONS.md](MINER_OPERATIONS.md) for full details: automated mode, S3 upload, pack format, and scoring targets.
 
-## trajrl — official Python package & skill collection
+## trajrl — the official CLI for TrajectoryRL skills
 
-`trajrl` publishes skills powered by the subnet — ready-to-use capabilities for AI agents, miners, and developers. Each skill is a self-contained `SKILL.md` that agents (Claude Code, Cursor, Codex) can discover and follow directly. CLI output is JSON when piped, Rich tables when interactive.
+TrajectoryRL is a skill factory: miners compete every epoch to produce policy packs that pass safety and correctness gates at the lowest cost, and the winning packs become **skills** — the subnet's product. `trajrl` is the official command-line tool that delivers those skills to end users.
 
 ```bash
 pip install trajrl
+```
 
+One install gives any human or AI agent (Claude Code, Cursor, Codex, …) access to every skill the subnet has shipped. Each skill is a self-contained `SKILL.md` that agents can discover and follow directly. CLI output is JSON when piped, Rich tables when interactive.
+
+```bash
 trajrl subnet status                       # Network overview
 trajrl subnet analyze <validator-hotkey>   # Full validator analysis
 trajrl subnet analyze <hotkey> --deep      # Drill into top miners
 ```
 
-Source, skills, and full documentation: https://github.com/trajectoryRL/trajrl
+Source, skill catalog, and full documentation: https://github.com/trajectoryRL/trajrl
 
 ## Documentation
 
@@ -234,7 +238,7 @@ Source, skills, and full documentation: https://github.com/trajectoryRL/trajrl
 - **[Validator Operations](VALIDATOR_OPERATIONS.md)** — Cost model, auto-updates, and operational guidance
 - **[Miner Operations](MINER_OPERATIONS.md)** — Pack format, run modes, local testing, and submission workflow
 - **[ClawBench](https://github.com/trajectoryRL/clawbench)** — Evaluation framework (scenarios, fixtures, scoring)
-- **[trajrl](https://github.com/trajectoryRL/trajrl)** — Official Python package and skill collection for the subnet
+- **[trajrl](https://github.com/trajectoryRL/trajrl)** — Official CLI delivering the subnet's skills to end users
 
 ## Community
 
