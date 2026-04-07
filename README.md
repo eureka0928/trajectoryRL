@@ -214,24 +214,19 @@ python scripts/run_batch.py
 
 See [MINER_OPERATIONS.md](MINER_OPERATIONS.md) for full details: automated mode, S3 upload, pack format, and scoring targets.
 
-## trajrl CLI
+## trajrl — official Python package & skill collection
 
-A standalone CLI for querying live subnet data — validators, miners, scores, submissions, and eval logs. Designed for both humans and AI agents (Claude Code, Cursor, Codex, OpenClaw, Manus).
+`trajrl` publishes skills powered by the subnet — ready-to-use capabilities for AI agents, miners, and developers. Each skill is a self-contained `SKILL.md` that agents (Claude Code, Cursor, Codex) can discover and follow directly. CLI output is JSON when piped, Rich tables when interactive.
 
 ```bash
 pip install trajrl
 
-trajrl status                       # Network health overview
-trajrl validators                   # List all validators
-trajrl scores                       # Per-miner scores (auto-picks validator)
-trajrl miner --uid <uid>            # Miner detail + diagnostics
-trajrl download -u <uid>            # Download miner's pack + eval results
-trajrl submissions --failed         # Recent failed submissions
-trajrl logs --show                  # Download and display latest cycle log
-trajrl logs --type cycle            # List cycle log archives
+trajrl subnet status                       # Network overview
+trajrl subnet analyze <validator-hotkey>   # Full validator analysis
+trajrl subnet analyze <hotkey> --deep      # Drill into top miners
 ```
 
-Outputs JSON automatically when piped, Rich tables when interactive. Source and full documentation: https://github.com/trajectoryRL/trajrl
+Source, skills, and full documentation: https://github.com/trajectoryRL/trajrl
 
 ## Documentation
 
@@ -239,7 +234,7 @@ Outputs JSON automatically when piped, Rich tables when interactive. Source and 
 - **[Validator Operations](VALIDATOR_OPERATIONS.md)** — Cost model, auto-updates, and operational guidance
 - **[Miner Operations](MINER_OPERATIONS.md)** — Pack format, run modes, local testing, and submission workflow
 - **[ClawBench](https://github.com/trajectoryRL/clawbench)** — Evaluation framework (scenarios, fixtures, scoring)
-- **[trajrl CLI](https://github.com/trajectoryRL/trajrl)** — Query live subnet data from the terminal
+- **[trajrl](https://github.com/trajectoryRL/trajrl)** — Official Python package and skill collection for the subnet
 
 ## Community
 
