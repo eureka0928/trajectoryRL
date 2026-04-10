@@ -1074,6 +1074,75 @@ class TrajectoryValidator:
                 target_window,
             )
 
+    async def _full_cycle_on_startup(self):
+        """Run a complete eval → propagation → aggregation cycle at startup.
+
+        Executes the three window phases sequentially regardless of the
+        current on-chain window phase, then sets winner weights.  The main
+        loop guards (``_last_eval_window``, ``_consensus_window``) are
+        updated so the loop will not re-run these phases for the same window.
+        """
+        logger.info("=" * 60)
+        logger.info("full_cycle_on_startup enabled — running full cycle")
+        logger.info("=" * 60)
+
+        current_block = self.subtensor.get_current_block()
+        window = compute_window(current_block, self._window_config)
+
+        # --- Phase 1: Evaluation ---
+        logger.info(
+            "Startup full cycle [1/3]: evaluation "
+            "(window=%d, block=%d)",
+            window.window_number, current_block,
+        )
+        await self._run_evaluation_cycle(current_block, window.window_number)
+        self._last_eval_at = int(time.time())
+        self._last_eval_window = window.window_number
+        self._last_eval_date = datetime.datetime.utcnow().date()
+        self.last_weight_block = self.subtensor.get_current_block()
+        self._save_ema_state()
+        self._save_eval_cache()
+
+        # --- Phase 2: Propagation ---
+        logger.info(
+            "Startup full cycle [2/3]: propagation (window=%d)",
+            window.window_number,
+        )
+        ok = await self._submit_consensus_payload(window)
+        if ok:
+            logger.info(
+                "Startup full cycle: consensus payload submitted successfully"
+            )
+        else:
+            logger.warning(
+                "Startup full cycle: consensus payload submission failed, "
+                "aggregation will proceed with available data"
+            )
+
+        # --- Phase 3: Aggregation ---
+        logger.info(
+            "Startup full cycle [3/3]: aggregation (window=%d)",
+            window.window_number,
+        )
+        await self._run_consensus_aggregation(window)
+
+        if self._consensus_window == window.window_number:
+            await self._set_winner_weights()
+            current_block = self.subtensor.get_current_block()
+            self.last_weight_block = current_block
+            logger.info(
+                "Startup full cycle complete: winner=%s, weights set at block %d",
+                self._winner_state.winner_hotkey
+                and self._winner_state.winner_hotkey[:8],
+                current_block,
+            )
+        else:
+            logger.warning(
+                "Startup full cycle: aggregation did not produce a result "
+                "for window %d",
+                window.window_number,
+            )
+
     def _should_start_evaluation(self, current_block: int) -> bool:
         """Return True if a new evaluation cycle should start.
 
@@ -1112,7 +1181,15 @@ class TrajectoryValidator:
             f"(~{self.config.weight_interval_blocks * 12 // 60}min)"
         )
 
-        if self.config.aggregate_when_start:
+        if self.config.full_cycle_on_startup:
+            try:
+                await self._full_cycle_on_startup()
+            except Exception as e:
+                logger.error(
+                    "Startup full cycle failed: %s — continuing to main loop",
+                    e, exc_info=True,
+                )
+        elif self.config.aggregate_when_start:
             try:
                 await self._aggregate_on_startup()
             except Exception as e:

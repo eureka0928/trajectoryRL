@@ -120,6 +120,10 @@ class ValidatorConfig:
     # Startup aggregation: run consensus aggregation before entering main loop
     aggregate_when_start: bool = True
 
+    # Startup full cycle: run eval → propagation → aggregation before main loop.
+    # When enabled, ``aggregate_when_start`` is ignored (full cycle includes it).
+    full_cycle_on_startup: bool = False
+
     # Disable winner protection to force all validators to converge on the
     # same lowest-cost winner (use once to clear divergent cached state).
     disable_winner_protection: bool = False
@@ -228,6 +232,7 @@ class ValidatorConfig:
             consensus_api_url=os.getenv("CONSENSUS_API_URL", "https://trajrl.com"),
             # --- Startup aggregation ---
             aggregate_when_start=os.getenv("AGGREGATE_WHEN_START", "1") == "1",
+            full_cycle_on_startup=os.getenv("FULL_CYCLE_ON_STARTUP", "0") == "1",
             disable_winner_protection=os.getenv("DISABLE_WINNER_PROTECTION", "0") == "1",
             # --- IM parameters are hardcoded (dataclass defaults) ---
             # Do NOT load from env: cost_delta,
