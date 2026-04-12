@@ -1,5 +1,6 @@
 # Season 1: Self-Learning Agents
 
+> v0.19: Hermes Agent as default harness (replaces OpenClaw). SSH is a first-class terminal backend (`TERMINAL_ENV=ssh`), Python-native, non-interactive mode (`hermes -q "task" --quiet`), Docker image `nousresearch/hermes-agent`. No adapter needed. 100% LLM judge scoring (§Scoring) replaces 40/60 automated/judge split — rule-based checks are gameable, state is grounding evidence not the scorer.
 > v0.18: ClawsBench prior-art analysis (§6a). Adopted: SQLite-backed mock state for deterministic snapshot/restore, gosu privilege hardening in sandbox container, negative safety scores [-1, 1], conformance test suite for mock endpoints. External validation that scaffolding (SKILL.md) dominates model choice by +39-63pp — confirms Season 1 thesis.
 > v0.17: chained continuity across 4 reps (shared world + recurring element on rep 3 + evolving fact on rep 4) so the split-half delta measures real cross-episode memory, not just meta-pattern transfer. Also: published judge prompts (§5a), tool-call efficiency diagnostic (§4a), constraint-SAT scenario added to Season 2 backlog (§2a-C). Addresses community feedback in PR #157.
 > v0.16: OpenClaw as Season 1 framework, incentive mechanism amendment (quality-based WTA/NCD/Winner Protection).
@@ -32,7 +33,7 @@ Run a sequence of tasks, judge each trajectory independently, compute the trend 
 
 2. **Agent-harness-agnostic.** The interface is: SSH into a sandbox, read SKILL.md + INSTRUCTION.md, execute. Every harness receives the same universal prompt, with no framework-specific file naming and no translation layer. The validator only sees a quality score per episode.
 
-   Season 1 launches with **OpenClaw** as the sole agent framework. The architecture is framework-agnostic by design: any harness that can operate a shell via SSH works (Claude Code, Hermes, custom agents). Miners author a SKILL.md containing domain knowledge, safety rules, and memory strategy. The competition is purely on instruction quality. A baseline like [ivangdavila/self-improving](https://clawhub.ai/ivangdavila/self-improving) shows what a minimal SKILL.md looks like. Future seasons can introduce framework rotation across epochs to enforce generality.
+   Season 1 launches with **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** as the default agent framework. The architecture is framework-agnostic by design: any harness that can operate a shell via SSH works (Hermes, Claude Code, OpenClaw, custom agents). Hermes Agent is the default because: (1) SSH is a first-class terminal backend (`TERMINAL_ENV=ssh`), no adapter needed; (2) non-interactive mode (`hermes -q "task" --quiet`) maps directly to the harness container pattern; (3) Python-native, matching the validator codebase; (4) official Docker image (`nousresearch/hermes-agent`). Miners author a SKILL.md containing domain knowledge, safety rules, and memory strategy. The competition is purely on instruction quality. Future seasons can introduce framework rotation across epochs to enforce generality.
 
 3. **Resistant to gaming.** A single scenario result can be hacked. A quality trend across 4 repetitions of the same scenario with different data is harder to fake, because:
    - Data is **different** each rep (same template, new content via validator-private salt)
@@ -72,7 +73,7 @@ The validator spawns **two ephemeral sibling containers** per evaluation via Doc
 │  ┌─────────────────────┐  SSH/exec ┌─────────────────────────────┐│
 │  │ Harness Container   │──────────→│ Sandbox Container           ││
 │  │                     │           │                             ││
-│  │ openclaw            │           │ Mock Services (stateful)    ││
+│  │ hermes-agent        │           │ Mock Services (stateful)    ││
 │  │ (Season 1)          │           │ MailHog, Notion, Calendar,  ││
 │  │                     │           │ Slack, Gitea                ││
 │  │ Egress: LLM API     │           │                             ││
@@ -92,18 +93,18 @@ The validator spawns **two ephemeral sibling containers** per evaluation via Doc
 | Container | Lifecycle | Network | Image |
 |-----------|-----------|---------|-------|
 | **Validator** | Persistent, Watchtower-managed | Host network | `ghcr.io/trajectoryrl/trajectoryrl:latest` |
-| **Harness** | Ephemeral (per-episode) | `eval_net` + LLM API egress only | Publisher's official image (OpenClaw for Season 1) |
+| **Harness** | Ephemeral (per-episode) | `eval_net` + LLM API egress only | `nousresearch/hermes-agent` (Hermes Agent for Season 1) |
 | **Sandbox** | Ephemeral (per-miner, persists across episodes) | `eval_net` only, no egress | `ghcr.io/trajectoryrl/sandbox:latest` |
 
 **Why two eval containers (harness + sandbox):**
 
-Separating harness from sandbox keeps the harness container **vanilla**: the publisher's unmodified image (OpenClaw for Season 1) runs as-is, with no custom layers, no injected mock services, no patching. The miner's SKILL.md lives in the sandbox, not the harness. This means (1) the validator never builds or modifies agent images, (2) the harness is bit-for-bit identical to what the publisher ships, and (3) egress rules are trivially enforced per container: the harness gets LLM API access, the sandbox gets none. Merging the two would require bundling mock services into every agent image or solving egress partitioning inside a single container with network namespaces, both strictly more complex than running two sibling containers with different iptables rules.
+Separating harness from sandbox keeps the harness container **vanilla**: the publisher's unmodified image (`nousresearch/hermes-agent` for Season 1) runs as-is, with no custom layers, no injected mock services, no patching. The miner's SKILL.md lives in the sandbox, not the harness. This means (1) the validator never builds or modifies agent images, (2) the harness is bit-for-bit identical to what the publisher ships, and (3) egress rules are trivially enforced per container: the harness gets LLM API access, the sandbox gets none. Merging the two would require bundling mock services into every agent image or solving egress partitioning inside a single container with network namespaces, both strictly more complex than running two sibling containers with different iptables rules.
 
 - **Harness is sandboxed.** The harness runs in its own container with egress restricted to the LLM API endpoint (iptables whitelist). No access to the validator host, no arbitrary internet. The validator passes its API key as an environment variable; the harness never touches the host filesystem.
 - **Sandbox is fully offline.** All egress blocked, no exceptions. No LLM proxy, no firewall holes.
 - **Validator stays clean.** No third-party images run on the host. The validator only needs Docker socket access to spawn sibling containers.
 - **Watchtower unchanged.** It manages the validator image. Eval containers are ephemeral and unlabeled, so Watchtower ignores them.
-- **Official images.** Season 1 uses the official OpenClaw Docker image. The validator pulls it once and spawns instances per-eval. No custom bundled images to maintain. Future seasons can add Claude Code, Hermes, or other frameworks by adding adapters.
+- **Official images.** Season 1 uses the official Hermes Agent Docker image (`nousresearch/hermes-agent`). The validator pulls it once and spawns instances per-eval. No custom bundled images to maintain. Future seasons can add Claude Code, OpenClaw, or other frameworks by adding adapters.
 - **Transcript capture.** The validator creates the Docker network and captures the harness container's stdout/stderr + SSH session logs.
 
 ### Universal Interface: Shell + Filesystem + HTTP
@@ -118,7 +119,7 @@ The agent framework connects to the sandbox via SSH (or `docker exec`) and has a
 
 Any method that speaks the protocol works: `curl localhost:1080/api/v2/messages`, `python3 -c "import smtplib; ..."`, or raw socket connections. The mock services expose **standard protocols**, not framework-specific APIs.
 
-**Key point:** The sandbox is tool-agnostic. It doesn't know or care which agent framework is operating it. It exposes standard protocols and inspects final state. An OpenClaw agent and a custom Python harness are evaluated identically: both SSH in and run commands.
+**Key point:** The sandbox is tool-agnostic. It doesn't know or care which agent framework is operating it. It exposes standard protocols and inspects final state. A Hermes agent and a custom Python harness are evaluated identically: both SSH in and run commands.
 
 ### Container Lifecycle
 
@@ -130,8 +131,9 @@ Per-miner evaluation (validator orchestrates via docker.sock):
   3. Load SKILL.md + fixtures into sandbox
 
   Per episode (4 total):
-    a. Start harness container on eval_net (official agent image)
-       - env: CLAWBENCH_LLM_API_KEY, UNIVERSAL_PROMPT, SSH creds
+    a. Start harness container on eval_net (nousresearch/hermes-agent)
+       - env: OPENROUTER_API_KEY, TERMINAL_ENV=ssh, SSH creds
+       - cmd: hermes -q "<universal_prompt>" --quiet
        - egress: LLM API endpoint only (iptables whitelist)
     b. Harness SSHes into sandbox, reads SKILL.md + INSTRUCTION.md, does task
     c. Harness container stops → validator captures logs
@@ -198,9 +200,19 @@ Universal prompt (validator-injected, same for all miners):
   Do not modify SKILL.md.
 ```
 
-**Season 1 framework: OpenClaw.** All evaluations use the official OpenClaw Docker image. The adapter is a thin wrapper that: (1) pulls the publisher's official image, (2) spawns a container on `eval_net` with the universal prompt + SSH credentials as env vars, (3) captures stdout/stderr when the container exits. OpenClaw handles tool execution via SSH natively.
+**Season 1 framework: [Hermes Agent](https://github.com/NousResearch/hermes-agent).** All evaluations use the official Hermes Agent Docker image (`nousresearch/hermes-agent`). No adapter needed — the validator spawns a container on `eval_net` with:
 
-The architecture supports any framework that can operate a shell via SSH. Adding a new framework requires only a new adapter (image name + launch config). Future seasons can introduce framework rotation (`epoch_framework = FRAMEWORKS[epoch_seed % len(FRAMEWORKS)]`) to enforce SKILL.md generality across frameworks.
+```
+TERMINAL_ENV=ssh
+TERMINAL_SSH_HOST=<sandbox_ip>
+TERMINAL_SSH_USER=agent
+TERMINAL_SSH_KEY=/tmp/session_key
+OPENROUTER_API_KEY=<validator_api_key>
+```
+
+And runs: `hermes -q "<universal_prompt>" --quiet`. Hermes SSHes into the sandbox, reads SKILL.md + INSTRUCTION.md, does the work, exits. Stdout is the transcript.
+
+The architecture supports any framework that can operate a shell via SSH. Adding a new framework requires only a different image + launch config. Future seasons can introduce framework rotation (`epoch_framework = FRAMEWORKS[epoch_seed % len(FRAMEWORKS)]`) to enforce SKILL.md generality across frameworks.
 
 **Security:** Miners control SKILL.md content only, not execution. No miner code runs on the validator host. Both the harness and sandbox run in isolated containers:
 
