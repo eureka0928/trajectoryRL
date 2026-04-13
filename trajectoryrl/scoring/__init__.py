@@ -600,7 +600,7 @@ def compute_consensus_costs(
 
     # When the network has fewer validators than the minimum, relax the gate
     # to the actual validator count so small networks are not deadlocked.
-    total_validators = len([s for s in validated_submissions if s.validator_stake > 0])
+    total_validators = len({s.payload.validator_hotkey for s in validated_submissions if s.validator_stake > 0})
     effective_min_validators = min(min_validators_qualified, total_validators)
 
     consensus_costs: Dict[str, float] = {}
