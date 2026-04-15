@@ -134,14 +134,20 @@ class SandboxEvaluationResult:
 
 def _docker_run_json(client: docker.DockerClient, image: str,
                      command: list[str], environment: dict | None = None,
-                     timeout: int = 120) -> dict:
-    """Run a command in a container and parse JSON stdout."""
+                     timeout: int = 120, **kwargs) -> dict:
+    """Run a command in a container and parse JSON stdout.
+
+    Skips the image entrypoint to avoid startup noise corrupting the
+    JSON output. CLI commands (generate, score, scenarios) don't need
+    the SSH/sandbox setup from the entrypoint.
+    """
     try:
         output = client.containers.run(
-            image, command=command,
+            image, command=command, entrypoint="",
             environment=environment or {},
             remove=True, stdout=True, stderr=True,
             mem_limit="2g", cpu_quota=100000,
+            **kwargs,
         )
         return json.loads(output.decode())
     except docker.errors.ContainerError as e:
@@ -206,7 +212,10 @@ class TrajectorySandboxHarness:
         self._harness_image = config.harness_image
         self._llm_api_key = config.judge_api_key or config.clawbench_api_key
         self._llm_api_url = config.judge_base_url or config.clawbench_base_url
-        self._llm_model = config.judge_model or config.clawbench_default_model
+        # Strip "openrouter/" prefix — the sandbox scorer calls OpenRouter
+        # directly via LLM_BASE_URL and doesn't use the prefix convention.
+        _model = config.judge_model or config.clawbench_default_model
+        self._llm_model = _model.removeprefix("openrouter/")
 
         # Sandbox version — queried at pull time, drives scoring_version
         self.sandbox_version: str = "unknown"
@@ -310,7 +319,18 @@ class TrajectorySandboxHarness:
         self, skill_md: str, epoch_seed: int, salt: str,
         num_episodes: int, pack_hash: str,
     ) -> _SessionResult:
-        """Synchronous eval: generate → run episodes → score → delta."""
+        """Synchronous eval: generate → run episodes → score → delta.
+
+        Architecture:
+        - Sandbox container: runs mock services (email, Slack, etc.)
+        - Harness container: runs the agent (Hermes) with LLM calls
+        - Shared workspace volume: host tmpdir mounted into both containers
+          at /workspace so the harness can read SKILL.md/INSTRUCTION.md
+        - Sandbox on internal network only (no internet)
+        - Harness on both default bridge (LLM egress) and internal network
+          (to reach sandbox mock services via container IP)
+        """
+        import tempfile
 
         session_id = secrets.token_hex(6)
         session_result = _SessionResult(pack_hash=pack_hash, validator_salt=salt)
@@ -337,27 +357,27 @@ class TrajectorySandboxHarness:
         # -----------------------------------------------------------
         # Step 2: Run episodes (sandbox + harness containers)
         # -----------------------------------------------------------
-        private_key, public_key = _generate_keypair()
         network = None
         sandbox = None
+        # Shared volume for /workspace/learned/ (persists agent notes
+        # across episodes). Other files (SKILL.md, INSTRUCTION.md) are
+        # written directly into each container via Docker API to avoid
+        # permission issues from the sandbox entrypoint.
+        learned_dir = tempfile.mkdtemp(prefix=f"eval_{session_id}_learned_")
 
         try:
-            # Create isolated network
+            # Create internal network for sandbox ↔ harness
             network_name = f"eval_{session_id}"
             network = self.client.networks.create(
                 network_name, driver="bridge", internal=True,
                 labels={"trajectoryrl.role": "eval_net"},
             )
 
-            # Start sandbox container
+            # Start sandbox container (internal network only — no internet)
             sandbox = self.client.containers.run(
                 self._sandbox_image,
                 name=f"sandbox_{session_id}",
                 detach=True, network=network.name,
-                environment={
-                    "SSH_PUBLIC_KEY": public_key,
-                    "SSH_USER": "agent",
-                },
                 mem_limit="2g", cpu_quota=100000,
                 labels={"trajectoryrl.role": "sandbox",
                         "trajectoryrl.session": session_id},
@@ -393,10 +413,6 @@ class TrajectorySandboxHarness:
             sandbox.reload()
             sandbox_ip = sandbox.attrs["NetworkSettings"]["Networks"][network.name]["IPAddress"]
 
-            # Load SKILL.md
-            _put_file(sandbox, "/workspace/SKILL.md", skill_md)
-            sandbox.exec_run(["mkdir", "-p", "/workspace/learned"])
-
             # Run each episode
             for i, ep_data in enumerate(episodes_data):
                 episode = self._run_episode(
@@ -408,7 +424,8 @@ class TrajectorySandboxHarness:
                     sandbox=sandbox,
                     sandbox_ip=sandbox_ip,
                     network=network,
-                    private_key=private_key,
+                    skill_md=skill_md,
+                    learned_dir=learned_dir,
                 )
                 session_result.episodes.append(episode)
 
@@ -424,6 +441,9 @@ class TrajectorySandboxHarness:
                     network.remove()
                 except Exception:
                     pass
+            # Clean up shared learned directory
+            import shutil
+            shutil.rmtree(learned_dir, ignore_errors=True)
 
         # -----------------------------------------------------------
         # Step 3: Compute split-half delta (simple math, no imports)
@@ -435,50 +455,65 @@ class TrajectorySandboxHarness:
         self, session_id: str, episode_index: int, ep_data: dict,
         world_data: dict, scenario: str,
         sandbox: Container, sandbox_ip: str,
-        network: Network, private_key: str,
+        network: Network, skill_md: str, learned_dir: str,
     ) -> _EpisodeResult:
         """Run a single episode: load fixtures, start harness, capture, score."""
+        import os
+        import tempfile
 
         episode = _EpisodeResult(episode_index=episode_index)
         t0 = time.time()
         logger.info("[%s] Episode %d starting", session_id, episode_index)
 
         try:
-            # Load fixtures into sandbox
+            # Load fixtures into sandbox mock services
             sandbox.exec_run(["sh", "-c", "curl -s -X POST http://localhost:8090/reset"])
             fixtures_json = json.dumps(ep_data["fixtures"])
             _put_file(sandbox, "/tmp/fixtures.json", fixtures_json)
             sandbox.exec_run(["sh", "-c",
                 "curl -s -X POST http://localhost:8090/load_fixtures "
                 "-H 'Content-Type: application/json' -d @/tmp/fixtures.json"])
-            _put_file(sandbox, "/workspace/INSTRUCTION.md", ep_data["instruction_md"])
 
-            # Start harness container
+            # Start harness container (INSTRUCTION.md written after start)
             harness_name = f"harness_{session_id}_ep{episode_index}"
             harness_prompt = (
                 "Read /workspace/SKILL.md for your approach. "
                 "Read /workspace/INSTRUCTION.md for the task. "
                 "Check /workspace/learned/ for notes from prior episodes. "
-                "Services are at http://localhost:8090 - start with /health. "
+                f"Services are at http://{sandbox_ip}:8090 - start with /health. "
                 "Do not modify SKILL.md."
             )
 
+            # Harness starts on default bridge (for LLM API egress),
+            # then gets attached to eval_net (for sandbox access).
             harness = self.client.containers.run(
                 self._harness_image,
                 command=["chat", "-q", harness_prompt,
+                         "-m", self._llm_model,
+                         "-t", "terminal,file,web,code_execution,memory",
                          "--quiet", "--yolo", "--max-turns", "30"],
-                name=harness_name, detach=True, network=network.name,
+                name=harness_name, detach=True,
+                working_dir="/workspace",
+                volumes={learned_dir: {"bind": "/workspace/learned", "mode": "rw"}},
                 environment={
                     "OPENROUTER_API_KEY": self._llm_api_key,
                     "LLM_API_KEY": self._llm_api_key,
+                    "HERMES_BUNDLED_SKILLS": "/nonexistent",
                 },
                 mem_limit="4g", cpu_quota=200000,
-                cap_add=["NET_ADMIN"],
                 labels={"trajectoryrl.role": "harness",
                         "trajectoryrl.session": session_id},
                 log_config=LogConfig(type=LogConfig.types.JSON,
                                      config={"max-size": "50m"}),
             )
+
+            # Write files into harness container via Docker API
+            # (avoids permission issues from shared volumes)
+            _put_file(harness, "/workspace/SKILL.md", skill_md)
+            _put_file(harness, "/workspace/INSTRUCTION.md", ep_data["instruction_md"])
+
+            # Attach harness to eval network so it can reach sandbox
+            network.connect(harness)
 
             try:
                 # Wait for harness to complete
@@ -525,11 +560,7 @@ class TrajectorySandboxHarness:
             logger.info("[%s] Episode %d scoring via sandbox image...",
                         session_id, episode_index)
 
-            # Write scoring inputs to temp files, mount into scorer container
-            import tempfile
-            import os
             with tempfile.TemporaryDirectory() as tmpdir:
-                # Write inputs
                 world_path = os.path.join(tmpdir, "world.json")
                 episode_path = os.path.join(tmpdir, "episode.json")
                 transcript_path = os.path.join(tmpdir, "transcript.txt")
@@ -544,7 +575,6 @@ class TrajectorySandboxHarness:
                 with open(state_path, "w") as f:
                     json.dump(episode.mock_state, f)
 
-                # Run scorer in sandbox image
                 score_output = self.client.containers.run(
                     self._sandbox_image,
                     command=[
@@ -555,6 +585,7 @@ class TrajectorySandboxHarness:
                         "--state", "/data/state.json",
                         "--scenario", scenario,
                     ],
+                    entrypoint="",
                     environment={
                         "LLM_API_KEY": self._llm_api_key,
                         "LLM_BASE_URL": self._llm_api_url,
