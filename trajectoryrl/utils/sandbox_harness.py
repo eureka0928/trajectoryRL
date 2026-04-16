@@ -374,10 +374,17 @@ class TrajectorySandboxHarness:
             )
 
             # Start sandbox container (internal network only — no internet)
+            # Alias "sandbox" lets the harness reach it via http://sandbox:8090
+            # so miners can write SKILL.md with stable hostnames, not raw IPs.
             sandbox = self.client.containers.run(
                 self._sandbox_image,
                 name=f"sandbox_{session_id}",
                 detach=True, network=network.name,
+                networking_config={
+                    network.name: self.client.api.create_endpoint_config(
+                        aliases=["sandbox"],
+                    ),
+                },
                 mem_limit="2g", cpu_quota=100000,
                 labels={"trajectoryrl.role": "sandbox",
                         "trajectoryrl.session": session_id},
@@ -410,9 +417,6 @@ class TrajectorySandboxHarness:
                         pass
                 time.sleep(1)
 
-            sandbox.reload()
-            sandbox_ip = sandbox.attrs["NetworkSettings"]["Networks"][network.name]["IPAddress"]
-
             # Run each episode
             for i, ep_data in enumerate(episodes_data):
                 episode = self._run_episode(
@@ -422,7 +426,6 @@ class TrajectorySandboxHarness:
                     world_data=world_data,
                     scenario=scenario,
                     sandbox=sandbox,
-                    sandbox_ip=sandbox_ip,
                     network=network,
                     skill_md=skill_md,
                     learned_dir=learned_dir,
@@ -454,7 +457,7 @@ class TrajectorySandboxHarness:
     def _run_episode(
         self, session_id: str, episode_index: int, ep_data: dict,
         world_data: dict, scenario: str,
-        sandbox: Container, sandbox_ip: str,
+        sandbox: Container,
         network: Network, skill_md: str, learned_dir: str,
     ) -> _EpisodeResult:
         """Run a single episode: load fixtures, start harness, capture, score."""
@@ -480,19 +483,21 @@ class TrajectorySandboxHarness:
                 "Read /workspace/SKILL.md for your approach. "
                 "Read /workspace/INSTRUCTION.md for the task. "
                 "Check /workspace/learned/ for notes from prior episodes. "
-                f"Services are at http://{sandbox_ip}:8090 - start with /health. "
+                "Services are at http://sandbox:8090 - start with /health. "
                 "Do not modify SKILL.md."
             )
 
-            # Harness starts on default bridge (for LLM API egress),
-            # then gets attached to eval_net (for sandbox access).
-            harness = self.client.containers.run(
+            # Create harness container (not started yet).
+            # We need to attach the eval network and write files BEFORE
+            # starting, so the agent can resolve "sandbox" hostname and
+            # read SKILL.md/INSTRUCTION.md from the first tool call.
+            harness = self.client.containers.create(
                 self._harness_image,
                 command=["chat", "-q", harness_prompt,
                          "-m", self._llm_model,
                          "-t", "terminal,file,web,code_execution,memory",
                          "--quiet", "--yolo", "--max-turns", "30"],
-                name=harness_name, detach=True,
+                name=harness_name,
                 working_dir="/workspace",
                 volumes={learned_dir: {"bind": "/workspace/learned", "mode": "rw"}},
                 environment={
@@ -507,13 +512,15 @@ class TrajectorySandboxHarness:
                                      config={"max-size": "50m"}),
             )
 
-            # Write files into harness container via Docker API
-            # (avoids permission issues from shared volumes)
+            # Attach eval network (sandbox reachable at http://sandbox:8090)
+            network.connect(harness)
+
+            # Write files into harness container before starting
             _put_file(harness, "/workspace/SKILL.md", skill_md)
             _put_file(harness, "/workspace/INSTRUCTION.md", ep_data["instruction_md"])
 
-            # Attach harness to eval network so it can reach sandbox
-            network.connect(harness)
+            # Now start — agent has network + files ready
+            harness.start()
 
             try:
                 # Wait for harness to complete
