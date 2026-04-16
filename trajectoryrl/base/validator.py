@@ -35,6 +35,7 @@ import bittensor as bt
 from ..utils.opp_schema import validate_opp_schema
 from ..utils.config import ValidatorConfig
 from ..utils.clawbench import ClawBenchHarness, EvaluationResult
+from ..utils.sandbox_harness import TrajectorySandboxHarness, SandboxEvaluationResult
 from ..scoring import TrajectoryScorer
 from ..utils.github import PackFetcher
 from ..utils.epoch_context import generate_epoch_context, render_context_preamble
@@ -43,10 +44,16 @@ from ..utils.eval_window import (
     compute_window, is_new_window, can_evaluate,
     should_submit, should_aggregate,
 )
+from ..utils import consensus as _consensus_mod
 from ..utils.consensus import (
     ConsensusPayload, ConsensusPointer,
-    CONSENSUS_PROTOCOL_VERSION, SCORING_VERSION,
+    CONSENSUS_PROTOCOL_VERSION,
 )
+
+def _scoring_version() -> int:
+    """Get current scoring version. In S1 mode this is set dynamically
+    from the sandbox image major version at the start of each eval cycle."""
+    return _consensus_mod.SCORING_VERSION
 from ..utils.consensus_store import (
     ConsensusStore, IPFSBackend, TrajRLAPIBackend,
 )
@@ -146,6 +153,13 @@ class TrajectoryValidator:
             clawbench_api_key=config.clawbench_api_key,
             clawbench_base_url=config.clawbench_base_url,
         )
+
+        # Season 1: trajrl-bench harness
+        self._sandbox_harness: TrajectorySandboxHarness | None = None
+        if config.evaluation_harness == "trajrl-bench":
+            logger.info("Season 1 mode: initializing trajrl-bench harness")
+            self._sandbox_harness = TrajectorySandboxHarness(config)
+        self._evaluation_harness = config.evaluation_harness
 
         self.scorer = TrajectoryScorer(
             consensus_epsilon=config.consensus_epsilon,
@@ -385,11 +399,11 @@ class TrajectoryValidator:
             data = json.loads(path.read_text())
 
             file_sv = data.get("scoring_version", 1)
-            if file_sv != SCORING_VERSION:
+            if file_sv != _scoring_version():
                 logger.info(
                     "EMA state scoring_version mismatch (%d != %d), "
                     "invalidating all eval state",
-                    file_sv, SCORING_VERSION,
+                    file_sv, _scoring_version(),
                 )
                 return
 
@@ -422,7 +436,7 @@ class TrajectoryValidator:
     def _save_ema_state(self):
         """Persist evaluation state to disk for restart recovery."""
         data = {
-            "scoring_version": SCORING_VERSION,
+            "scoring_version": _scoring_version(),
             "scenario_config_hash": self._scenario_config_hash,
             "raw_costs": self.raw_costs,
             "scenario_qualified": self.scenario_qualified,
@@ -456,7 +470,7 @@ class TrajectoryValidator:
         """Load eval result cache from disk, pruning entries older than TTL.
 
         The cache file carries a ``scoring_version`` header.  When the
-        version does not match the running ``SCORING_VERSION``, the entire
+        version does not match the running scoring version, the entire
         cache is discarded because evaluation criteria have changed and
         all prior results are invalid.
         """
@@ -476,11 +490,11 @@ class TrajectoryValidator:
                 file_sv = 1
                 entries = raw
 
-            if file_sv != SCORING_VERSION:
+            if file_sv != _scoring_version():
                 logger.info(
                     "Eval cache scoring_version mismatch (%d != %d), "
                     "discarding %d cached entries",
-                    file_sv, SCORING_VERSION, len(entries),
+                    file_sv, _scoring_version(), len(entries),
                 )
                 return
 
@@ -504,7 +518,7 @@ class TrajectoryValidator:
         try:
             self._eval_cache_path.parent.mkdir(parents=True, exist_ok=True)
             wrapper = {
-                "scoring_version": SCORING_VERSION,
+                "scoring_version": _scoring_version(),
                 "entries": self._eval_cache,
             }
             self._eval_cache_path.write_text(
@@ -762,7 +776,7 @@ class TrajectoryValidator:
             protocol_version=self.config.consensus_protocol_version,
             window_number=window.window_number,
             content_address=content_address,
-            scoring_version=SCORING_VERSION,
+            scoring_version=_scoring_version(),
         )
 
         if len(commitment_str.encode("utf-8")) > MAX_COMMITMENT_BYTES:
@@ -772,7 +786,7 @@ class TrajectoryValidator:
                 protocol_version=self.config.consensus_protocol_version,
                 window_number=window.window_number,
                 content_address=fallback_address,
-                scoring_version=SCORING_VERSION,
+                scoring_version=_scoring_version(),
             )
             logger.warning(
                 "Window %d: commitment too long with dual address, "
@@ -840,7 +854,7 @@ class TrajectoryValidator:
             costs=costs_by_hotkey,
             qualified=qualified_by_hotkey,
             timestamp=int(time.time()),
-            scoring_version=SCORING_VERSION,
+            scoring_version=_scoring_version(),
             disqualified=disqualified_by_hotkey,
         )
 
@@ -868,7 +882,7 @@ class TrajectoryValidator:
         skipped_sv = 0
         download_failed = 0
         for vc in chain_commitments:
-            if vc.scoring_version != SCORING_VERSION:
+            if vc.scoring_version != _scoring_version():
                 skipped_sv += 1
                 continue
             pointer = ConsensusPointer(
@@ -888,7 +902,7 @@ class TrajectoryValidator:
             logger.info(
                 "Window %d: skipped %d commitments with mismatched "
                 "scoring_version (expected %d)",
-                window.window_number, skipped_sv, SCORING_VERSION,
+                window.window_number, skipped_sv, _scoring_version(),
             )
 
         my_hotkey = self.wallet.hotkey.ss58_address
@@ -909,7 +923,7 @@ class TrajectoryValidator:
                     "Window %d: no usable commitments — all %d filtered out "
                     "due to scoring_version mismatch (local=%d), "
                     "using local results",
-                    window.window_number, total, SCORING_VERSION,
+                    window.window_number, total, _scoring_version(),
                 )
             else:
                 logger.warning(
@@ -936,7 +950,7 @@ class TrajectoryValidator:
             min_stake=min_stake,
             local_version=clawbench_version,
             expected_protocol=self.config.consensus_protocol_version,
-            expected_scoring_version=SCORING_VERSION,
+            expected_scoring_version=_scoring_version(),
         )
 
         if not validated:
@@ -1530,6 +1544,18 @@ class TrajectoryValidator:
 
         self._disqualified_miners = {}
 
+        # Pull latest sandbox image before eval (gets new scenarios + version)
+        if self._sandbox_harness:
+            await self._sandbox_harness.pull_latest()
+            # S1: scoring version = sandbox image major version (v1.0.0 → 1)
+            # Update the module-level constant so all consensus/cache/filter
+            # code in this process uses the sandbox-derived version.
+            import trajectoryrl.utils.consensus as _consensus
+            _consensus_mod.SCORING_VERSION = self._sandbox_harness.scoring_version
+            logger.info("S1 scoring_version=%d (sandbox %s)",
+                        self._sandbox_harness.scoring_version,
+                        self._sandbox_harness.sandbox_version)
+
         # Epoch seed for context variation
         epoch = current_block // self.config.eval_interval_blocks
         epoch_seed = self.compute_epoch_seed(epoch, self.config.netuid)
@@ -1679,7 +1705,7 @@ class TrajectoryValidator:
                         rejected=True,
                         rejection_stage="integrity_check",
                         rejection_detail=detail,
-                        scoring_version=SCORING_VERSION,
+                        scoring_version=_scoring_version(),
                     )
                 )
                 self.raw_costs.pop(hotkey, None)
@@ -1733,7 +1759,7 @@ class TrajectoryValidator:
                             rejected=True,
                             rejection_stage=_stage,
                             rejection_detail=_detail,
-                            scoring_version=SCORING_VERSION,
+                            scoring_version=_scoring_version(),
                         )
                     )
                     self._disqualified_miners[hotkey] = f"pre_eval_rejected:{reason}"
@@ -2155,7 +2181,7 @@ class TrajectoryValidator:
                     rejected=True,
                     rejection_stage="integrity_check",
                     rejection_detail=integrity.summary,
-                    scoring_version=SCORING_VERSION,
+                    scoring_version=_scoring_version(),
                 )
             )
             self._disqualified_miners[commitment.hotkey] = "integrity_failed"
@@ -2171,6 +2197,16 @@ class TrajectoryValidator:
 
         self._hotkey_packs[commitment.hotkey] = pack
         self._pack_by_hash[commitment.pack_hash] = pack
+
+        # Season 1 path: use trajrl-bench harness
+        if self._evaluation_harness == "trajrl-bench" and self._sandbox_harness:
+            return await self._evaluate_miner_s1(
+                miner_uid=miner_uid,
+                commitment=commitment,
+                pack=pack,
+                epoch_seed=epoch_seed,
+                block_height=block_height,
+            )
 
         # Step 4+5: Run episodes and judge trajectories
         scenario_costs: Dict[str, float] = {}
@@ -2338,6 +2374,110 @@ class TrajectoryValidator:
             "session_files": scenario_session_files,
         }
 
+    async def _evaluate_miner_s1(
+        self,
+        miner_uid: int,
+        commitment: "MinerCommitment",
+        pack: dict,
+        epoch_seed: int,
+        block_height: int = 0,
+    ) -> Optional[Dict]:
+        """Season 1 evaluation path: trajrl-bench with LLM judge.
+
+        Runs N episodes of the same scenario in an SSH sandbox with
+        Hermes Agent. Uses split-half delta scoring (quality-based,
+        not cost-based).
+
+        Returns same shape as _evaluate_miner for pipeline compatibility:
+            {"costs": {...}, "qualified": {...}, ...}
+        """
+        mlog = self._get_miner_logger(commitment.hotkey)
+        harness = self._sandbox_harness
+
+        # S1 packs must contain ONLY SKILL.md (no AGENTS.md or other files)
+        files = pack.get("files", {})
+        skill_md = files.get("SKILL.md") or files.get("skill.md")
+        if not skill_md:
+            mlog.warning("No SKILL.md found in pack — not a valid S1 submission")
+            self._disqualified_miners[commitment.hotkey] = "no_skill_md"
+            return None
+
+        allowed = {"SKILL.md", "skill.md"}
+        extra = set(files.keys()) - allowed
+        if extra:
+            mlog.warning("S1 pack contains disallowed files: %s — only SKILL.md permitted", extra)
+            self._disqualified_miners[commitment.hotkey] = "extra_files"
+            return None
+
+        mlog.info(
+            "S1 evaluation: %d episodes, skill_md=%d chars",
+            self.config.sandbox_num_episodes, len(skill_md),
+        )
+
+        try:
+            result = await harness.evaluate_miner(
+                skill_md=skill_md,
+                epoch_seed=epoch_seed,
+                pack_hash=commitment.pack_hash,
+                validator_salt=self._default_validator_salt(),
+            )
+        except Exception as e:
+            mlog.error("S1 evaluation failed: %s", e, exc_info=True)
+            self._disqualified_miners[commitment.hotkey] = "s1_eval_error"
+            return None
+
+        if result.error:
+            mlog.warning("S1 evaluation error: %s", result.error)
+            self._disqualified_miners[commitment.hotkey] = "s1_eval_error"
+            return None
+
+        # Map S1 result to validator pipeline format.
+        # S1 uses a single "scenario" (incident_response) with quality scoring.
+        scenario_name = result.scenario_name
+        qualified = result.success
+
+        mlog.info(
+            "S1 result: final_score=%.3f, mean_quality=%.3f, delta=%.3f, "
+            "episodes=%s, qualified=%s",
+            result.score, result.mean_quality, result.delta,
+            result.episode_qualities, qualified,
+        )
+
+        scenario_qualified = {scenario_name: qualified}
+        scenario_costs = {}  # S1 is quality-based, not cost-based
+        scenario_judge_details = {
+            scenario_name: {
+                "overall_score": round(result.score, 4),
+                "mean_quality": round(result.mean_quality, 4),
+                "delta": round(result.delta, 4),
+                "early_mean": round(result.early_mean, 4),
+                "late_mean": round(result.late_mean, 4),
+                "episode_qualities": [round(q, 4) for q in result.episode_qualities],
+                "qualification_gate": qualified,
+                "harness": "trajrl-bench",
+                "sandbox_version": harness.sandbox_version,
+            },
+        }
+
+        return {
+            "costs": scenario_costs,
+            "qualified": scenario_qualified,
+            "token_usage": {},
+            "model_usage": {},
+            "judge_details": scenario_judge_details,
+            "session_keys": {},
+            "session_files": {},
+            # S1-specific: full SandboxEvaluationResult for eval log upload.
+            # Not serialized — consumed by _fire_upload_eval_logs and dropped.
+            "_s1_sandbox_result": result,
+        }
+
+    def _default_validator_salt(self) -> str:
+        """Derive a stable validator salt from the wallet hotkey."""
+        import hashlib
+        data = f"{self.wallet.hotkey.ss58_address}:{self.config.netuid}"
+        return hashlib.sha256(data.encode()).hexdigest()[:16]
+
     # ------------------------------------------------------------------
     # Eval submission
     # ------------------------------------------------------------------
@@ -2467,7 +2607,7 @@ class TrajectoryValidator:
             scenario_results=scenario_results,
             llm_base_url=self._judge_base_url,
             llm_model=self._judge_model,
-            scoring_version=SCORING_VERSION,
+            scoring_version=_scoring_version(),
         )
 
     # ------------------------------------------------------------------
@@ -2636,6 +2776,17 @@ class TrajectoryValidator:
         """Collect and upload eval logs. Fire-and-forget."""
         session_keys = eval_result.get("session_keys", {}) if eval_result else {}
         session_files = eval_result.get("session_files", {}) if eval_result else {}
+
+        # If this was an S1 eval, write the sandbox artifacts (transcripts,
+        # evaluation.json, JUDGE.md, fixtures) into eval_dir so they're
+        # included in the tar.gz uploaded to the dashboard.
+        s1_result = eval_result.get("_s1_sandbox_result") if eval_result else None
+        if s1_result is not None:
+            try:
+                s1_result.write_artifacts(eval_dir)
+            except Exception as e:
+                logger.warning("Failed to write S1 eval artifacts: %s", e)
+
         log_archive = self._collect_eval_logs(
             commitment.hotkey, eval_scenarios, eval_dir,
             validator_log_offset, miner_log_offset, session_keys,

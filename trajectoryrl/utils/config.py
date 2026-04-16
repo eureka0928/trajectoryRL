@@ -140,6 +140,15 @@ class ValidatorConfig:
     judge_api_key: str = ""
     judge_base_url: str = ""
 
+    # Evaluation harness
+    # "trajrl-bench": Season 1 (SKILL.md packs, SSH sandbox, LLM judge)
+    # "clawbench": v4.0 legacy (AGENTS.md packs, OpenClaw, cost-based)
+    evaluation_harness: str = "trajrl-bench"
+    sandbox_image: str = "ghcr.io/trajectoryrl/trajrl-bench:latest"
+    harness_image: str = "ghcr.io/trajectoryrl/hermes-agent:latest"
+    sandbox_timeout_per_episode: int = 180  # 3 min per episode
+    sandbox_num_episodes: int = 4
+
     # EMA state persistence
     ema_state_path: Path = field(
         default_factory=lambda: Path("/var/lib/trajectoryrl/ema_state.json")
@@ -231,6 +240,12 @@ class ValidatorConfig:
                 if gw.strip()
             ],
             consensus_api_url=os.getenv("CONSENSUS_API_URL", "https://trajrl.com"),
+            # --- Season 1 (trajrl-bench) ---
+            evaluation_harness=os.getenv("EVALUATION_HARNESS", "trajrl-bench"),
+            sandbox_image=os.getenv("SANDBOX_IMAGE", "ghcr.io/trajectoryrl/trajrl-bench:latest"),
+            harness_image=os.getenv("HARNESS_IMAGE", "ghcr.io/trajectoryrl/hermes-agent:latest"),
+            sandbox_timeout_per_episode=int(os.getenv("SANDBOX_TIMEOUT_PER_EPISODE", "180")),
+            sandbox_num_episodes=int(os.getenv("SANDBOX_NUM_EPISODES", "4")),
             # --- Startup aggregation ---
             aggregate_when_start=os.getenv("AGGREGATE_WHEN_START", "1") == "1",
             full_cycle_on_startup=os.getenv("FULL_CYCLE_ON_STARTUP", "0") == "1",
