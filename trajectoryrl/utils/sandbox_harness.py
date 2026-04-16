@@ -109,8 +109,7 @@ class _SessionResult:
 class SandboxEvaluationResult:
     """Result from a Season 1 sandbox evaluation.
 
-    Duck-type compatible with clawbench.EvaluationResult for the fields
-    the validator pipeline reads.
+    Provides the standard result interface for the validator pipeline.
     """
 
     def __init__(self, session_result: _SessionResult,
@@ -303,13 +302,13 @@ class TrajectorySandboxHarness:
 
     def __init__(self, config: ValidatorConfig):
         self.config = config
-        self.client = docker.from_env()
+        self._docker_client: docker.DockerClient | None = None
 
         self._sandbox_image = config.sandbox_image
         self._harness_image = config.harness_image
-        self._llm_api_key = config.judge_api_key or config.clawbench_api_key
-        self._llm_api_url = config.judge_base_url or config.clawbench_base_url
-        _model = config.judge_model or config.clawbench_default_model
+        self._llm_api_key = config.judge_api_key or config.llm_api_key
+        self._llm_api_url = config.judge_base_url or config.llm_base_url
+        _model = config.judge_model or config.llm_model
         self._llm_model = _strip_provider_prefix(_model)
 
         # Sandbox version — queried at pull time, drives scoring_version
@@ -319,6 +318,17 @@ class TrajectorySandboxHarness:
         # Image digests — populated after pull_latest
         self.bench_image_hash: str = "unknown"
         self.harness_image_hash: str = "unknown"
+
+    @property
+    def client(self) -> docker.DockerClient:
+        """Lazy Docker client — connects on first access, not at init time.
+
+        Allows the validator to start and run non-eval functions (weights,
+        consensus, metagraph sync) even when docker.sock is not mounted.
+        """
+        if self._docker_client is None:
+            self._docker_client = docker.from_env()
+        return self._docker_client
 
     @property
     def scoring_version(self) -> int:
