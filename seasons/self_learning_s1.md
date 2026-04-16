@@ -125,6 +125,19 @@ Per episode: start testee, wait for it to solve+exit, start judge, wait for it t
 
 ## SKILL.md: Agent-Agnostic Pack Format
 
+Miners submit a `pack.json` (OPP v1). The `files` dict describes a folder; `SKILL.md` is the entry point. One pack participates in one contest.
+
+```json
+{
+  "schema_version": 1,
+  "files": {
+    "SKILL.md": "# Entry point..."
+  }
+}
+```
+
+Season 1 requires `SKILL.md` only. Future packs may include additional files that SKILL.md references (playbooks, examples, data). The on-chain commitment format is unchanged: `{pack_hash}|{pack_url}`.
+
 **SKILL.md** is a plain markdown document. The sandbox places it at `/workspace/SKILL.md` as root-owned mode 440 (agent can read, cannot modify). The testee agent, regardless of framework, reads it.
 
 SKILL.md is **static**: a finished product the miner ships. It contains domain knowledge, task execution patterns, safety rules, and memory management strategy. It does not contain workspace plumbing or meta-instructions (those come from the harness prompt).
@@ -496,7 +509,7 @@ Season 1 amends [INCENTIVE_MECHANISM.md](INCENTIVE_MECHANISM.md) v4.2 by replaci
 | **Qualification gate** | All safety + correctness pass | `final_score > 0` (any non-zero quality) |
 | **Winner Protection** | `challenger_cost < winner_cost × (1 - δ)` | `challenger_score > winner_score × (1 + δ)` |
 | **Winner self-update** | Lower own winning cost | Raise own winning score |
-| **Pack format** | PolicyBundle (AGENTS.md + tool_policy) | SKILL.md only |
+| **Pack format** | PolicyBundle (AGENTS.md + tool_policy) | Skill pack (SKILL.md entry point, one pack per contest) |
 | **NCD target** | AGENTS.md content | SKILL.md content |
 
 Winner Protection flips direction: `challenger_score > winner_score × (1 + δ)` where δ=0.10. Everything else (WTA, NCD threshold 0.80, consensus aggregation, inactivity 14400 blocks, evaluation cadence, weight setting) works identically to v4.2.
@@ -664,27 +677,28 @@ Additional scenario types (Season 2+):
 - **Error resilience**: Intermittent service failures the agent must handle gracefully
 - **Constraint satisfaction under ambiguity**: scheduling/packing problems with overlapping constraints
 
-### Future: Concurrent Seasons (Multi-Season Evaluation)
+### Future: Concurrent Contests
 
-When the subnet runs multiple concurrent seasons, each season is an independent contest with its own scoring.
+The subnet can run multiple contests concurrently. Each contest is an independent eval with its own set of scenarios. **One pack = one contest.** A miner competing in multiple contests submits separate packs (separate commitments) for each.
 
-**Pack format extension:**
+**Pack as a folder.** The `files` dict describes a flat folder. `SKILL.md` is the entry point; future skill packs may include additional files (data, examples, reference docs) that SKILL.md references. The validator always reads `SKILL.md` as the root.
 
 ```json
 {
-  "schema_version": 2,
-  "skills": {
-    "incident_response": { "SKILL.md": "..." },
-    "codebase_fix": { "SKILL.md": "..." }
+  "schema_version": 1,
+  "files": {
+    "SKILL.md": "# Entry point — references other files...",
+    "playbook.md": "# Detailed runbook for incident handling...",
+    "examples/triage.md": "# Example triage output..."
   }
 }
 ```
 
-One pack, one hash, one URL. Validator extracts the right SKILL.md per season. Miner competing in all seasons submits all.
+Season 1 requires only `SKILL.md`. Additional files are reserved for future use.
 
-**Scoring:** Each season produces an independent `final_score`. Weight allocation across seasons is governance-configured.
+**Scoring:** Each contest produces an independent `final_score`. Weight allocation across contests is governance-configured.
 
-**On-chain:** Commitment format unchanged (`{pack_hash}|{pack_url}`). `scoring_version` (from sandbox major) ensures validators with different scenario sets don't mix results.
+**On-chain:** Commitment format unchanged (`{pack_hash}|{pack_url}`). One commitment per contest. `scoring_version` (from sandbox major) ensures validators with different scenario sets don't mix results.
 
 ---
 

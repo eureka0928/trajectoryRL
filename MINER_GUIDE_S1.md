@@ -26,7 +26,7 @@ Per miner:
 
 ## Pack Format
 
-Your pack is a JSON file with **only** `SKILL.md` in the files dict:
+Your pack is a JSON file. The `files` dict is a folder; `SKILL.md` is the entry point. One pack = one contest.
 
 ```json
 {
@@ -37,7 +37,7 @@ Your pack is a JSON file with **only** `SKILL.md` in the files dict:
 }
 ```
 
-That's it. No `AGENTS.md`, no `tool_policy`, no `target_suite`. Packs with extra files are rejected.
+Season 1 requires `SKILL.md` only. Future packs may include additional files that SKILL.md references. No `AGENTS.md`, no `tool_policy`.
 
 ### What's different from v4.0
 
