@@ -52,6 +52,34 @@ One install gives any agent (Claude Code, Cursor, Codex, OpenClaw, Hermes, Manus
 - **Winner-take-all** — Best miner gets 100% of rewards; first-mover advantage protects early innovators
 - **Anti-copy** — NCD similarity detection + first-mover threshold
 
+## The Flywheel — Season 2: Skill Forge
+
+Season 1 runs on hand-designed scenarios. Season 2 removes the human bottleneck: real user trajectories become the next generation of eval scenarios, auto-packaged by an agent. Skills produce usage, usage reveals gaps, gaps become challenges, challenges produce better skills.
+
+```
+┌────────────┐    ┌────────────┐    ┌──────────────┐    ┌────────────┐    ┌────────────┐
+│ ① SKILLS   │ →  │ ② USERS    │ →  │③TRAJECTORIES │ →  │④CHALLENGES │ →  │⑤COMPETITION│
+│  install   │    │ run agents │    │  contribute  │    │  agent     │    │   miners   │
+│            │    │ on real    │    │  (PII strip  │    │  packages  │    │   compete  │
+│            │    │ work       │    │   → pool)    │    │  failures  │    │  → winner  │
+└────────────┘    └────────────┘    └──────────────┘    └────────────┘    └─────┬──────┘
+      ▲                                                                         │
+      └─────────────────────────────────────────────────────────────────────────┘
+                    winning SKILL.md publishes → users install → loop spins again
+```
+
+**① Install and run.** Users pull a SKILL.md, point their agent at real work. The skill either solves the job or doesn't.
+
+**② Contribute.** `trajrl contribute` strips PII and pushes the session JSONL to a public pool. Paid in TAO if your trajectory becomes a discriminating challenge.
+
+**③ Auto-craft.** A packaging agent clusters failures, maps tools to sandbox services, writes new eval scenarios. No humans in the routine loop.
+
+**④ Compete.** Miners rank on a growing pool they can't predict. General-purpose SKILL.md is the only winning strategy.
+
+**⑤ Publish.** Winning SKILL.md hits the registry. Next cycle is harder — easy failures are already solved.
+
+Contributors, miners, and validators share the same emission pool. Users install the winners and get better agents every cycle. Status: Season 2 ships after S1 stabilizes; cold start uses S1 validator transcripts plus opt-in contribution from power users.
+
 ## Quick Start
 
 ### For Validators
