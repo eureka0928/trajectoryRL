@@ -1,6 +1,6 @@
 """Tests for TrajectoryRL validator components.
 
-Tests the scoring, OPP schema validation, EMA scoring, and config
+Tests the scoring, OPP schema validation, eval scoring, and config
 without requiring a live Bittensor network.
 """
 
@@ -1005,12 +1005,12 @@ class TestGetCommitmentBlock:
 
 
 # ===================================================================
-# Per-Scenario EMA Tests
+# Per-Scenario Eval State Tests
 # ===================================================================
 
 
-class TestPerScenarioEMA:
-    """Tests for per-scenario EMA scoring (keyed by hotkey)."""
+class TestPerScenarioEvalState:
+    """Tests for per-scenario eval scoring (keyed by hotkey)."""
 
     def _make_validator(self):
         """Create a minimal validator with mocked Bittensor components."""
@@ -1039,7 +1039,7 @@ class TestPerScenarioEMA:
             config.weight_interval_blocks = 360
             config.cost_delta = 0.10
             config.required_categories = ["safety", "correctness"]
-            config.ema_state_path = Path("/tmp/test_ema_state.json")
+            config.eval_state_path = Path("/tmp/test_eval_state.json")
             config.pack_cache_dir = Path("/tmp/test_packs")
             config.pack_cache_max_size = 100
             config.delta_threshold = 0.05
@@ -1131,22 +1131,22 @@ class TestPerScenarioEMA:
         v.last_eval_block = {"hk_0": 99000}
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            v.config.ema_state_path = Path(f.name)
+            v.config.eval_state_path = Path(f.name)
 
         try:
-            v._save_ema_state()
+            v._save_eval_state()
 
             v2 = self._make_validator()
-            v2.config.ema_state_path = v.config.ema_state_path
+            v2.config.eval_state_path = v.config.eval_state_path
             v2._scenario_config_hash = "test_hash"
-            v2._load_ema_state()
+            v2._load_eval_state()
 
             assert v2.raw_costs == {"hk_0": {"client_escalation": 0.042}}
             assert v2.scenario_qualified == {"hk_0": {"client_escalation": True}}
             assert v2._eval_pack_hash == {"hk_0": "hash_a"}
             assert v2.last_eval_block == {"hk_0": 99000}
         finally:
-            v.config.ema_state_path.unlink(missing_ok=True)
+            v.config.eval_state_path.unlink(missing_ok=True)
 
     def test_raw_cost_tracking(self):
         """Raw costs are recorded per-scenario."""
@@ -1240,20 +1240,20 @@ class TestPerScenarioEMA:
         v._eval_pack_hash = {"hk_0": "hash_a"}
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-            v.config.ema_state_path = Path(f.name)
+            v.config.eval_state_path = Path(f.name)
 
         try:
-            v._save_ema_state()
+            v._save_eval_state()
 
             v2 = self._make_validator()
-            v2.config.ema_state_path = v.config.ema_state_path
+            v2.config.eval_state_path = v.config.eval_state_path
             v2._scenario_config_hash = "new_hash"
-            v2._load_ema_state()
+            v2._load_eval_state()
 
             assert v2.raw_costs == {}
             assert v2._eval_pack_hash == {}
         finally:
-            v.config.ema_state_path.unlink(missing_ok=True)
+            v.config.eval_state_path.unlink(missing_ok=True)
 
 
 # ===================================================================
@@ -1292,7 +1292,7 @@ class TestInactivityBlocks:
             config.weight_interval_blocks = 360
             config.cost_delta = 0.10
             config.required_categories = ["safety", "correctness"]
-            config.ema_state_path = Path("/tmp/test_ema_state.json")
+            config.eval_state_path = Path("/tmp/test_eval_state.json")
 
             mock_subtensor = MagicMock()
             mock_subtensor.get_current_block.return_value = 100000

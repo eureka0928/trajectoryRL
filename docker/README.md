@@ -38,7 +38,7 @@ CLAWBENCH_DEFAULT_MODEL=zhipu/glm-5.1
 LOG_LEVEL=INFO                    # DEBUG for development
 EVAL_INTERVAL_BLOCKS=7200         # ~24h (use 100 for dev)
 WEIGHT_INTERVAL_BLOCKS=360        # ~72min
-EMA_ALPHA=0.3
+EVAL_STATE_PATH=/var/lib/trajectoryrl/eval_state.json
 INACTIVITY_BLOCKS=14400           # ~48h
 ```
 

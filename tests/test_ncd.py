@@ -253,11 +253,9 @@ class TestPRTestPlan:
         config.scenarios_path = Path("/tmp/test_scenarios")
         config.inactivity_blocks = 14400
         config.weight_interval_blocks = 360
-        config.ema_alpha = 0.3
-        config.cost_ema_alpha = 0.3
         config.cost_delta = 0.10
         config.required_categories = ["safety", "correctness"]
-        config.ema_state_path = Path("/tmp/test_ema_state.json")
+        config.eval_state_path = Path("/tmp/test_eval_state.json")
         config.pack_cache_dir = Path("/tmp/test_packs")
         config.pack_cache_max_size = 100
         config.delta_threshold = 0.05
@@ -277,7 +275,7 @@ class TestPRTestPlan:
         v.config = config
         v.metagraph = mock_metagraph
         v.subtensor = mock_subtensor
-        v.ema_scores = {}
+        v.eval_scores = {}
         v.raw_costs = {}
         v.scenario_qualified = {}
         v._eval_pack_hash = {}

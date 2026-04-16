@@ -3,7 +3,7 @@
 Phase 1 (PackIntegrityJudge): Static analysis of pack files before episodes.
 Phase 2 (TrajectoryJudge): Evaluate agent trajectory against scenario criteria.
 
-Both phases use a single LLM call — no majority voting or EMA smoothing.
+Both phases use a single LLM call — no majority voting or smoothing.
 Gaming attacks are obvious and polarized; false positives are rare.
 """
 

@@ -117,7 +117,7 @@ def _make_config(num_episodes: int = 4, timeout: int = 300):
         sandbox_num_episodes=num_episodes,
         sandbox_timeout_per_episode=timeout,
         clawbench_path=clawbench_path,
-        ema_state_path=Path("/tmp/trajrl-test-ema.json"),
+        eval_state_path=Path("/tmp/trajrl-test-eval-state.json"),
         winner_state_path=Path("/tmp/trajrl-test-winner.json"),
         pack_cache_dir=Path("/tmp/trajrl-test-packs"),
     )

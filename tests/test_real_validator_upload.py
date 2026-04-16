@@ -127,7 +127,7 @@ def _make_config():
         sandbox_num_episodes=4,
         sandbox_timeout_per_episode=300,
         clawbench_path=clawbench_path,
-        ema_state_path=Path("/tmp/trajrl-real-test-ema.json"),
+        eval_state_path=Path("/tmp/trajrl-real-test-eval-state.json"),
         winner_state_path=Path("/tmp/trajrl-real-test-winner.json"),
         pack_cache_dir=Path("/tmp/trajrl-real-test-packs"),
         log_dir=Path("/tmp/trajrl-real-test-logs"),

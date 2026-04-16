@@ -5,7 +5,7 @@ exec python -u scripts/eval_miners.py --miner-uid 225 "$@"
 
 Reads miner commitments from the chain, fetches & verifies packs,
 runs ClawBench evaluation on all scenarios, and prints results.
-No side effects: no weight setting, no EMA persistence, no on-chain writes.
+No side effects: no weight setting, no eval state persistence, no on-chain writes.
 
 Can be used as a Docker entrypoint (like neurons/validator.py) or standalone.
 
@@ -445,7 +445,7 @@ async def run_evaluation(args):
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate one or more miners by UID using on-chain commitment data. "
-                    "Read-only: no weight setting, no EMA persistence, no on-chain writes.",
+                    "Read-only: no weight setting, no eval state persistence, no on-chain writes.",
     )
 
     parser.add_argument(

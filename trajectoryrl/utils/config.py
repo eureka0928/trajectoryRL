@@ -118,9 +118,9 @@ class ValidatorConfig:
     sandbox_timeout_per_episode: int = 180  # 3 min per episode
     sandbox_num_episodes: int = 4
 
-    # EMA state persistence
-    ema_state_path: Path = field(
-        default_factory=lambda: Path("/var/lib/trajectoryrl/ema_state.json")
+    # Evaluation state persistence
+    eval_state_path: Path = field(
+        default_factory=lambda: Path("/var/lib/trajectoryrl/eval_state.json")
     )
 
     # Winner Protection state persistence
@@ -169,7 +169,10 @@ class ValidatorConfig:
             netuid=int(os.getenv("NETUID", "11")),
             network=os.getenv("NETWORK", "finney"),
             # --- Paths ---
-            ema_state_path=Path(os.getenv("EMA_STATE_PATH", "/var/lib/trajectoryrl/ema_state.json")),
+            eval_state_path=Path(os.getenv(
+                "EVAL_STATE_PATH",
+                os.getenv("EMA_STATE_PATH", "/var/lib/trajectoryrl/eval_state.json"),
+            )),
             winner_state_path=Path(os.getenv("WINNER_STATE_PATH", "/var/lib/trajectoryrl/winner_state.json")),
             # --- LLM (new names preferred, legacy CLAWBENCH_* still supported) ---
             llm_model=os.getenv("LLM_MODEL") or os.getenv("CLAWBENCH_DEFAULT_MODEL", DEFAULT_LLM_MODEL),

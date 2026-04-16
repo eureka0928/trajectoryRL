@@ -218,7 +218,7 @@ class TrajectoryValidator:
             publish_pct=config.window_publish_pct,
             aggregate_pct=config.window_aggregate_pct,
         )
-        # Which window's aggregation has completed (persisted in EMA state).
+        # Which window's aggregation has completed (persisted in eval state).
         # Guards one-shot aggregation per window — survives restarts.
         self._consensus_window: int = -1
 
@@ -254,11 +254,11 @@ class TrajectoryValidator:
         self._winner_state = load_winner_state(self._winner_state_path)
 
 
-        # Scenario config hash for EMA invalidation — driven by bench version
+        # Scenario config hash for state invalidation — driven by bench version
         self._scenario_config_hash = "trajrl-bench"
 
-        # Load persisted EMA state
-        self._load_ema_state()
+        # Load persisted evaluation state
+        self._load_eval_state()
 
         # Eval result cache: pack_hash -> {result, last_eval_at}
         self._eval_cache: Dict[str, dict] = {}
@@ -348,7 +348,7 @@ class TrajectoryValidator:
         return bool(n and n >= _METAGRAPH_MIN_NEURONS)
 
     # ------------------------------------------------------------------
-    # EMA persistence
+    # Evaluation state persistence
     # ------------------------------------------------------------------
 
     def _compute_scenario_config_hash(self) -> str:
@@ -356,23 +356,28 @@ class TrajectoryValidator:
         config_str = f"trajrl-bench:{self._sandbox_harness.sandbox_version}"
         return hashlib.sha256(config_str.encode()).hexdigest()[:16]
 
-    def _load_ema_state(self):
+    def _load_eval_state(self):
         """Load persisted evaluation state from disk.
 
         Invalidates all state when either ``scoring_version`` or
         ``scenario_config_hash`` no longer matches the running code.
         """
-        path = self.config.ema_state_path
+        path = self.config.eval_state_path
         if not path.exists():
-            logger.debug("No persisted eval state found, starting fresh")
-            return
+            legacy = path.parent / "ema_state.json"
+            if legacy.exists():
+                logger.info("Migrating legacy ema_state.json → %s", path.name)
+                path = legacy
+            else:
+                logger.debug("No persisted eval state found, starting fresh")
+                return
         try:
             data = json.loads(path.read_text())
 
             file_sv = data.get("scoring_version", 1)
             if file_sv != _scoring_version():
                 logger.info(
-                    "EMA state scoring_version mismatch (%d != %d), "
+                    "Eval state scoring_version mismatch (%d != %d), "
                     "invalidating all eval state",
                     file_sv, _scoring_version(),
                 )
@@ -404,7 +409,7 @@ class TrajectoryValidator:
         except Exception as e:
             logger.warning(f"Failed to load eval state: {e}, starting fresh")
 
-    def _save_ema_state(self):
+    def _save_eval_state(self):
         """Persist evaluation state to disk for restart recovery."""
         data = {
             "scoring_version": _scoring_version(),
@@ -418,12 +423,12 @@ class TrajectoryValidator:
             "integrity_cache": self.integrity_judge.dump_cache(),
         }
         try:
-            self.config.ema_state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.config.ema_state_path.write_text(
+            self.config.eval_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.config.eval_state_path.write_text(
                 json.dumps(data, indent=2, sort_keys=True)
             )
         except Exception as e:
-            logger.warning(f"Failed to save EMA state: {e}")
+            logger.warning(f"Failed to save eval state: {e}")
 
     # ------------------------------------------------------------------
     # Eval result cache
@@ -435,7 +440,7 @@ class TrajectoryValidator:
 
     @property
     def _eval_cache_path(self) -> Path:
-        return self.config.ema_state_path.parent / "eval_cache.json"
+        return self.config.eval_state_path.parent / "eval_cache.json"
 
     def _load_eval_cache(self):
         """Load eval result cache from disk, pruning entries older than TTL.
@@ -538,7 +543,7 @@ class TrajectoryValidator:
         }
 
     # ------------------------------------------------------------------
-    # EMA update
+    # Eval state update
     # ------------------------------------------------------------------
 
     def _update_eval_results(
@@ -747,7 +752,7 @@ class TrajectoryValidator:
                 "Window %d: consensus pointer written on-chain "
                 "(address=%s, %d miners, commitment=%s, %d bytes)",
                 window.window_number, content_address[:24],
-                len(payload.costs), commitment_str[:60],
+                len(payload.scores), commitment_str[:60],
                 len(commitment_str.encode("utf-8")),
             )
             return True
@@ -1030,7 +1035,7 @@ class TrajectoryValidator:
                 uid, hk[:8], score, status, marker,
             )
 
-        self._save_ema_state()
+        self._save_eval_state()
 
     async def _aggregate_on_startup(self):
         """Run consensus aggregation once at startup before entering the main loop.
@@ -1085,7 +1090,7 @@ class TrajectoryValidator:
         aggregation_succeeded = (self._consensus_window == target_window)
 
         self._consensus_window = saved_consensus_window
-        self._save_ema_state()
+        self._save_eval_state()
 
         if aggregation_succeeded:
             await self._set_winner_weights()
@@ -1130,7 +1135,7 @@ class TrajectoryValidator:
         self._last_eval_window = window.window_number
         self._last_eval_date = datetime.datetime.utcnow().date()
         self.last_weight_block = self.subtensor.get_current_block()
-        self._save_ema_state()
+        self._save_eval_state()
         self._save_eval_cache()
 
         # --- Phase 2: Propagation ---
@@ -1271,7 +1276,7 @@ class TrajectoryValidator:
                     self.pack_fetcher.cleanup_cache(
                         self.config.pack_cache_max_size
                     )
-                    self._save_ema_state()
+                    self._save_eval_state()
                     self._save_eval_cache()
 
                     if self._cycle_eval_id is not None:
@@ -1346,7 +1351,7 @@ class TrajectoryValidator:
 
             except KeyboardInterrupt:
                 logger.info("Received interrupt, shutting down...")
-                self._save_ema_state()
+                self._save_eval_state()
                 self._save_eval_cache()
                 if self._cycle_eval_id is not None:
                     await self._fire_upload_cycle_logs(
@@ -1725,8 +1730,8 @@ class TrajectoryValidator:
                 )
 
             if eval_result is not None:
-                ema_reset = self._eval_pack_hash.get(hotkey) != commitment.pack_hash
-                if ema_reset:
+                pack_changed = self._eval_pack_hash.get(hotkey) != commitment.pack_hash
+                if pack_changed:
                     self._eval_counts[hotkey] = 0
                 self._eval_counts[hotkey] = self._eval_counts.get(hotkey, 0) + 1
                 eval_count = self._eval_counts[hotkey]
@@ -1757,7 +1762,7 @@ class TrajectoryValidator:
                 # Submit eval result to dashboard (fire-and-forget)
                 asyncio.ensure_future(
                     self._fire_submit_eval(
-                        uid, commitment, eval_result, eval_count, ema_reset, current_block
+                        uid, commitment, eval_result, eval_count, pack_changed, current_block
                     )
                 )
 
@@ -1801,7 +1806,7 @@ class TrajectoryValidator:
             + ", ".join(parts)
         )
 
-        # Log EMA cost summary to per-miner files
+        # Log cost summary to per-miner files
         if evaluated_count > 0:
             for uid, commitment in active_commitments.items():
                 hk = commitment.hotkey
@@ -2091,7 +2096,7 @@ class TrajectoryValidator:
         commitment: "MinerCommitment",
         eval_result: Dict,
         eval_count: int,
-        ema_reset: bool,
+        pack_changed: bool,
         block_height: int,
     ) -> None:
         """Build and fire the /api/scores/submit payload for one miner eval.
@@ -2147,7 +2152,7 @@ class TrajectoryValidator:
         mlog.info(
             f"  score={raw_score:.4f} cost=${raw_cost:.4f} "
             f"total_cost=${total_raw_cost:.4f} qualified={fully_qualified} "
-            f"pack_changed={ema_reset}"
+            f"pack_changed={pack_changed}"
         )
         mlog.info(
             f"  pack_url={commitment.pack_url} "
