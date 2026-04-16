@@ -54,7 +54,7 @@ One install gives any agent (Claude Code, Cursor, Codex, OpenClaw, Hermes, Manus
 
 ## The Flywheel — Season 2: Skill Forge
 
-Season 1 runs on hand-designed scenarios. Season 2 removes the human bottleneck: real user trajectories become the next generation of eval scenarios, auto-packaged by an agent. Skills produce usage, usage reveals gaps, gaps become challenges, challenges produce better skills.
+Season 1 runs on hand-designed scenarios. Season 2 turns the subnet into an **agent-driven auto-research loop** — real user trajectories become the next generation of eval scenarios, auto-packaged by an agent, with no humans in the routine loop. Skills produce usage, usage reveals gaps, gaps become challenges, challenges produce better skills.
 
 ```
 ┌────────────┐    ┌────────────┐    ┌──────────────┐    ┌────────────┐    ┌────────────┐
@@ -78,7 +78,9 @@ Season 1 runs on hand-designed scenarios. Season 2 removes the human bottleneck:
 
 **⑤ Publish.** Winning SKILL.md hits the registry. Next cycle is harder — easy failures are already solved.
 
-Contributors, miners, and validators share the same emission pool. Users install the winners and get better agents every cycle. Status: Season 2 ships after S1 stabilizes; cold start uses S1 validator transcripts plus opt-in contribution from power users.
+Contributors, miners, and validators share the same emission pool. Users install the winners and get better agents every cycle. The loop is agent-driven end to end — a packaging agent crafts scenarios, a judge agent grades competition, a meta-analyst agent watches what's under-represented in the pool. Humans do meta-research (watch for drift, adjust prompts), not routine operation.
+
+Status: Season 2 ships after S1 stabilizes; cold start uses S1 validator transcripts plus opt-in contribution from power users.
 
 ## Quick Start
 
