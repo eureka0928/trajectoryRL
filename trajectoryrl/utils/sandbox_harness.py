@@ -230,12 +230,18 @@ def _docker_run_json(client: docker.DockerClient, image: str,
 
 def _put_file(
     container: Container, path: str, content: str | bytes,
-    mode: int = 0o644,
+    mode: int = 0o644, uid: int = 0, gid: int = 0,
 ) -> None:
     """Write a file into a container via tar archive.
 
     Works on containers that are created but not yet started (no exec_run
-    required). Sets file mode via tar header.
+    required). Sets file mode + ownership via tar header.
+
+    The uid/gid parameters matter when the container's runtime user is
+    not root (e.g. the Hermes image drops privileges to uid 10000 via
+    gosu). A file dropped with the default uid=0,mode=0o600 is
+    unreadable by a non-root runtime user — callers must pass the
+    target container's uid/gid.
     """
     import posixpath
     dir_name = posixpath.dirname(path)
@@ -246,6 +252,8 @@ def _put_file(
         info = tarfile.TarInfo(name=file_name)
         info.size = len(data)
         info.mode = mode
+        info.uid = uid
+        info.gid = gid
         tar.addfile(info, io.BytesIO(data))
     buf.seek(0)
     container.put_archive(dir_name, buf)
@@ -268,7 +276,42 @@ def _generate_keypair() -> tuple[str, str]:
     return private_key, public_key
 
 
+# Hermes image runtime user. The image's ENTRYPOINT gosu-drops to this
+# uid before running the agent command, so any file we put_archive into
+# the container must be owned by (or readable by) this uid.
+_HERMES_UID = 10000
+
+# Pre-entrypoint wrapper for Hermes containers: executed as root before
+# the image's own entrypoint gosu-drops to the hermes user. Chowns
+# /workspace so the judge can write /workspace/evaluation.json (Docker
+# creates working_dir= paths as root:root). Then exec's the image's
+# original entrypoint with the original command args intact.
+_HERMES_PREENTRY = (
+    "chown -R hermes:hermes /workspace 2>/dev/null; "
+    "chmod 0755 /workspace 2>/dev/null; "
+    "exec /opt/hermes/docker/entrypoint.sh \"$@\""
+)
+_HERMES_ENTRYPOINT = ["/bin/sh", "-c", _HERMES_PREENTRY, "--"]
+
+
 _PROVIDER_PREFIXES = ("openrouter/", "chutes/")
+
+
+def _hermes_custom_config(model: str, base_url: str, api_key: str) -> str:
+    """Build a hermes config.yaml pinning an OpenAI-compatible endpoint.
+
+    Hermes CLI's --provider choices list is hard-coded and rejects "custom";
+    HERMES_INFERENCE_PROVIDER env is also ignored. The only way to pin a
+    generic OpenAI-compatible endpoint (chutes, openrouter, ollama, …) is to
+    write $HERMES_HOME/config.yaml before startup.
+    """
+    return (
+        "model:\n"
+        '  provider: "custom"\n'
+        f"  default: {json.dumps(model)}\n"
+        f"  base_url: {json.dumps(base_url)}\n"
+        f"  api_key: {json.dumps(api_key)}\n"
+    )
 
 
 def _strip_provider_prefix(model: str) -> str:
@@ -625,17 +668,20 @@ class TrajectorySandboxHarness:
 
             harness = self.client.containers.create(
                 self._harness_image,
+                entrypoint=_HERMES_ENTRYPOINT,
                 command=["chat", "-q", harness_prompt,
                          "-m", self._llm_model,
                          "-t", "terminal,file,code_execution,memory",
                          "--quiet", "--yolo", "--max-turns", "30"],
                 name=harness_name,
                 environment={
-                    "OPENROUTER_API_KEY": self._llm_api_key,
-                    "LLM_API_KEY": self._llm_api_key,
-                    "LLM_BASE_URL": self._llm_api_url,
-                    "LLM_MODEL": self._llm_model,
                     "HERMES_BUNDLED_SKILLS": "/nonexistent",
+                    # Hermes' "custom" provider resolves the API key from
+                    # env, not from config.yaml's api_key: field. Provide
+                    # both common names so whichever routing path the
+                    # resolver takes can authenticate.
+                    "OPENROUTER_API_KEY": self._llm_api_key,
+                    "OPENAI_API_KEY":     self._llm_api_key,
                 },
                 mem_limit="4g", cpu_quota=200000,
                 labels={"trajectoryrl.role": "testee",
@@ -647,9 +693,22 @@ class TrajectorySandboxHarness:
             # Attach eval network so testee can reach sandbox via SSH
             network.connect(harness)
 
-            # Install SSH private key into testee container (mode 0600
-            # so ssh client accepts it).
-            _put_file(harness, "/tmp/id_ed25519", private_key, mode=0o600)
+            # Install SSH private key into testee container. Owned by the
+            # hermes uid so the non-root agent can read it (mode 0600 is
+            # required by the ssh client for private keys).
+            _put_file(harness, "/tmp/id_ed25519", private_key,
+                      mode=0o600, uid=_HERMES_UID, gid=_HERMES_UID)
+
+            # Pin hermes to the configured OpenAI-compatible endpoint.
+            # Without this, hermes' --provider auto routes by model name
+            # (e.g. zai-org/* → openrouter) and ignores LLM_BASE_URL env.
+            _put_file(
+                harness, "/opt/data/config.yaml",
+                _hermes_custom_config(
+                    self._llm_model, self._llm_api_url, self._llm_api_key,
+                ),
+                mode=0o644, uid=_HERMES_UID, gid=_HERMES_UID,
+            )
 
             harness.start()
 
@@ -675,6 +734,13 @@ class TrajectorySandboxHarness:
                     ).decode(errors="replace")
                 except Exception:
                     pass
+
+                logger.info(
+                    "[%s] Episode %d testee transcript tail (%d chars):\n%s",
+                    session_id, episode_index,
+                    len(episode.transcript or ""),
+                    (episode.transcript or "")[-3000:],
+                )
 
             finally:
                 try:
@@ -744,6 +810,7 @@ class TrajectorySandboxHarness:
         try:
             judge = self.client.containers.create(
                 self._harness_image,
+                entrypoint=_HERMES_ENTRYPOINT,
                 command=["chat", "-q",
                          "Read /workspace/JUDGE.md for your evaluation protocol. "
                          "Read /workspace/JUDGE_TASK.md for this episode's evidence. "
@@ -760,11 +827,11 @@ class TrajectorySandboxHarness:
                 name=judge_name,
                 working_dir="/workspace",
                 environment={
-                    "OPENROUTER_API_KEY": self._llm_api_key,
-                    "LLM_API_KEY": self._llm_api_key,
-                    "LLM_BASE_URL": self._llm_api_url,
-                    "LLM_MODEL": self._llm_model,
                     "HERMES_BUNDLED_SKILLS": "/nonexistent",
+                    # See testee container: Hermes' "custom" provider reads
+                    # the API key from env, not from config.yaml.
+                    "OPENROUTER_API_KEY": self._llm_api_key,
+                    "OPENAI_API_KEY":     self._llm_api_key,
                 },
                 mem_limit="4g", cpu_quota=200000,
                 labels={"trajectoryrl.role": "judge",
@@ -774,9 +841,19 @@ class TrajectorySandboxHarness:
             )
 
             network.connect(judge)
-            _put_file(judge, "/workspace/JUDGE.md", judge_skill)
-            _put_file(judge, "/workspace/JUDGE_TASK.md", judge_instruction)
-            _put_file(judge, "/tmp/id_ed25519", private_key, mode=0o600)
+            _put_file(judge, "/workspace/JUDGE.md", judge_skill,
+                      uid=_HERMES_UID, gid=_HERMES_UID)
+            _put_file(judge, "/workspace/JUDGE_TASK.md", judge_instruction,
+                      uid=_HERMES_UID, gid=_HERMES_UID)
+            _put_file(judge, "/tmp/id_ed25519", private_key,
+                      mode=0o600, uid=_HERMES_UID, gid=_HERMES_UID)
+            _put_file(
+                judge, "/opt/data/config.yaml",
+                _hermes_custom_config(
+                    self._llm_model, self._llm_api_url, self._llm_api_key,
+                ),
+                mode=0o644, uid=_HERMES_UID, gid=_HERMES_UID,
+            )
             judge.start()
 
             try:
@@ -795,6 +872,13 @@ class TrajectorySandboxHarness:
                     stdout=True, stderr=False).decode(errors="replace")
             except Exception:
                 pass
+
+            logger.info(
+                "[%s] Episode %d judge transcript tail (%d chars):\n%s",
+                session_id, episode_index,
+                len(episode.judge_transcript or ""),
+                (episode.judge_transcript or "")[-3000:],
+            )
 
             # Read evaluation.json from the judge container via get_archive
             # (works even after the container has exited)
