@@ -63,9 +63,9 @@ def validate_opp_schema(pack: dict) -> ValidationResult:
         if not isinstance(pack["files"], dict):
             issues.append("'files' must be a dict")
         else:
-            # Check for required files
-            if "AGENTS.md" not in pack["files"]:
-                issues.append("Missing required file: AGENTS.md")
+            # Check for required policy file (SKILL.md for S1, AGENTS.md legacy)
+            if "SKILL.md" not in pack["files"] and "AGENTS.md" not in pack["files"]:
+                issues.append("Missing required policy file: SKILL.md (or AGENTS.md)")
 
             # Validate file content is string
             for filename, content in pack["files"].items():

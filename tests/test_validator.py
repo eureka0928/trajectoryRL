@@ -88,7 +88,7 @@ def valid_pack():
     return {
         "schema_version": 1,
         "files": {
-            "AGENTS.md": "# Agent rules\nBe safe and efficient.",
+            "SKILL.md": "# Agent rules\nBe safe and efficient.",
             "SOUL.md": "# Tone\nProfessional and concise.",
         },
         "tool_policy": {
@@ -185,11 +185,11 @@ class TestOPPSchemaValidation:
         assert not result.passed
         assert any("files" in i for i in result.issues)
 
-    def test_missing_agents_md(self, valid_pack):
-        del valid_pack["files"]["AGENTS.md"]
+    def test_missing_policy_file(self, valid_pack):
+        del valid_pack["files"]["SKILL.md"]
         result = validate_opp_schema(valid_pack)
         assert not result.passed
-        assert any("AGENTS.md" in i for i in result.issues)
+        assert any("SKILL.md" in i for i in result.issues)
 
     def test_missing_tool_policy(self, valid_pack):
         del valid_pack["tool_policy"]
@@ -204,7 +204,7 @@ class TestOPPSchemaValidation:
         assert any("metadata" in i for i in result.issues)
 
     def test_invalid_file_content_type(self, valid_pack):
-        valid_pack["files"]["AGENTS.md"] = 123
+        valid_pack["files"]["SKILL.md"] = 123
         result = validate_opp_schema(valid_pack)
         assert not result.passed
         assert any("string" in i for i in result.issues)
@@ -222,7 +222,7 @@ class TestOPPSchemaValidation:
         assert any("semver" in i for i in result.issues)
 
     def test_oversized_pack(self, valid_pack):
-        valid_pack["files"]["AGENTS.md"] = "x" * 200_000
+        valid_pack["files"]["SKILL.md"] = "x" * 200_000
         result = validate_opp_schema(valid_pack)
         assert not result.passed
         assert any("too large" in i.lower() or "32KB" in i for i in result.issues)
@@ -445,43 +445,11 @@ class TestEpochContext:
         assert "CT" in preamble
 
     def test_render_context_preamble_ends_with_separator(self):
-        """Preamble ends with --- separator so miner AGENTS.md follows cleanly."""
+        """Preamble ends with --- separator so miner SKILL.md follows cleanly."""
         ctx = generate_epoch_context(42)
         preamble = render_context_preamble(ctx)
         assert "---" in preamble
         assert preamble.endswith("\n")
-
-    def test_context_preamble_prepended_to_agents_md(self, harness):
-        """Harness prepends context preamble to AGENTS.md in workspace."""
-        pack = {
-            "files": {"AGENTS.md": "# My Policy\nBe helpful."},
-        }
-        ctx = generate_epoch_context(42)
-        preamble = render_context_preamble(ctx)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir) / "workspace"
-            harness._apply_pack_to_workspace(pack, workspace, preamble)
-
-            agents_md = (workspace / "AGENTS.md").read_text()
-            # Preamble comes first
-            assert agents_md.startswith("<!-- Epoch Evaluation Context")
-            # Miner content follows
-            assert "# My Policy" in agents_md
-            assert "Be helpful." in agents_md
-            # Context fields are present
-            assert ctx.user_name in agents_md
-
-    def test_no_preamble_when_empty(self, harness):
-        """Empty context_preamble leaves AGENTS.md unchanged."""
-        pack = {
-            "files": {"AGENTS.md": "# Original Content"},
-        }
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir) / "workspace"
-            harness._apply_pack_to_workspace(pack, workspace, "")
-            agents_md = (workspace / "AGENTS.md").read_text()
-            assert agents_md == "# Original Content"
 
     def test_variation_space_is_large(self):
         """Verify the combinatorial explosion across pools."""
@@ -538,7 +506,7 @@ class TestPackFetcher:
 
     def test_verify_valid_pack(self):
         """Valid JSON pack URL + matching hash → verification passes."""
-        pack = {"schema_version": 1, "files": {"AGENTS.md": "# Test"}}
+        pack = {"schema_version": 1, "files": {"SKILL.md": "# Test"}}
         pack_json = json.dumps(pack, sort_keys=True)
         pack_hash = hashlib.sha256(pack_json.encode()).hexdigest()
 
@@ -582,7 +550,7 @@ class TestPackFetcher:
 
     def test_verify_hash_mismatch(self):
         """Content doesn't match expected hash → verification fails."""
-        pack_json = json.dumps({"schema_version": 1, "files": {"AGENTS.md": "# Test"}}, sort_keys=True)
+        pack_json = json.dumps({"schema_version": 1, "files": {"SKILL.md": "# Test"}}, sort_keys=True)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             fetcher = PackFetcher(cache_dir=Path(tmpdir))
@@ -622,7 +590,7 @@ class TestPackFetcher:
 
     def test_cache_hit_skips_fetch(self):
         """Cached pack with matching hash → no HTTP fetch needed."""
-        pack = {"schema_version": 1, "files": {"AGENTS.md": "# Cached"}}
+        pack = {"schema_version": 1, "files": {"SKILL.md": "# Cached"}}
         pack_json = json.dumps(pack, sort_keys=True)
         pack_hash = hashlib.sha256(pack_json.encode()).hexdigest()
 
@@ -789,37 +757,37 @@ class TestNCDSimilarity:
 
     def test_identical_packs(self):
         from trajectoryrl.utils.ncd import pack_similarity, is_too_similar
-        a = {"files": {"AGENTS.md": "Be safe and careful. Follow instructions."}}
-        b = {"files": {"AGENTS.md": "Be safe and careful. Follow instructions."}}
+        a = {"files": {"SKILL.md": "Be safe and careful. Follow instructions."}}
+        b = {"files": {"SKILL.md": "Be safe and careful. Follow instructions."}}
         sim = pack_similarity(a, b)
         assert sim > 0.90  # Identical content → near 1.0 (short strings have zlib overhead)
         assert is_too_similar(a, b, threshold=0.80) is True
 
     def test_completely_different_packs(self):
         from trajectoryrl.utils.ncd import pack_similarity, is_too_similar
-        a = {"files": {"AGENTS.md": "Be safe and careful. Follow instructions precisely."}}
-        b = {"files": {"AGENTS.md": "Cook pasta for dinner. Add salt to water."}}
+        a = {"files": {"SKILL.md": "Be safe and careful. Follow instructions precisely."}}
+        b = {"files": {"SKILL.md": "Cook pasta for dinner. Add salt to water."}}
         sim = pack_similarity(a, b)
         assert sim < 0.5  # Unrelated content → low similarity
         assert is_too_similar(a, b, threshold=0.80) is False
 
     def test_whitespace_only_difference(self):
         from trajectoryrl.utils.ncd import pack_similarity
-        a = {"files": {"AGENTS.md": "# Rules\n\nBe safe and careful."}}
-        b = {"files": {"AGENTS.md": "#  Rules\n\n\nBe  safe  and  careful."}}
+        a = {"files": {"SKILL.md": "# Rules\n\nBe safe and careful."}}
+        b = {"files": {"SKILL.md": "#  Rules\n\n\nBe  safe  and  careful."}}
         sim = pack_similarity(a, b)
         # After normalization, whitespace is collapsed → should be very similar
         assert sim > 0.90
 
     def test_no_winner_never_similar(self):
         from trajectoryrl.utils.ncd import is_too_similar
-        a = {"files": {"AGENTS.md": "Any content"}}
+        a = {"files": {"SKILL.md": "Any content"}}
         assert is_too_similar(a, None, threshold=0.80) is False
 
     def test_threshold_boundary(self):
         from trajectoryrl.utils.ncd import is_too_similar, pack_similarity
-        a = {"files": {"AGENTS.md": "Be safe and careful. Follow all rules."}}
-        b = {"files": {"AGENTS.md": "Be safe and careful. Follow all rules."}}
+        a = {"files": {"SKILL.md": "Be safe and careful. Follow all rules."}}
+        b = {"files": {"SKILL.md": "Be safe and careful. Follow all rules."}}
         sim = pack_similarity(a, b)
         # Exact match should be >= threshold
         assert is_too_similar(a, b, threshold=sim) is True

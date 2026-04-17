@@ -1,6 +1,6 @@
 """Normalized Compression Distance (NCD) similarity check for policy packs.
 
-Used to detect copy-paste attacks. Compares AGENTS.md content between
+Used to detect copy-paste attacks. Compares SKILL.md content between
 packs using zlib compression as a proxy for information-theoretic similarity.
 
 Deduplication is pairwise: all active miners are compared against each
@@ -17,6 +17,10 @@ from typing import Dict, Set, Tuple
 logger = logging.getLogger(__name__)
 
 SIMILARITY_THRESHOLD = 0.80
+
+def _extract_policy(pack: dict) -> str:
+    """Extract the SKILL.md policy file content from a pack."""
+    return pack.get("files", {}).get("SKILL.md", "")
 
 
 def normalize_policy(text: str) -> str:
@@ -35,13 +39,13 @@ def normalize_policy(text: str) -> str:
 def pack_similarity(pack_a: dict, pack_b: dict) -> float:
     """Compute NCD-based similarity between two packs.
 
-    Compares the AGENTS.md content after normalization.
+    Compares the primary policy file after normalization.
 
     Returns:
         Similarity score in [0, 1]. 1.0 = identical, 0.0 = unrelated.
     """
-    a = normalize_policy(pack_a["files"]["AGENTS.md"])
-    b = normalize_policy(pack_b["files"]["AGENTS.md"])
+    a = normalize_policy(_extract_policy(pack_a))
+    b = normalize_policy(_extract_policy(pack_b))
 
     a_bytes = a.encode("utf-8")
     b_bytes = b.encode("utf-8")
@@ -119,7 +123,7 @@ def deduplicate_packs(
     for pack_hash, (hotkey, pack, block_number) in unique_reps.items():
         try:
             text = normalize_policy(
-                pack["files"]["AGENTS.md"]
+                _extract_policy(pack)
             ).encode("utf-8")
             precomputed[pack_hash] = (text, len(zlib.compress(text, 9)))
         except (KeyError, TypeError):

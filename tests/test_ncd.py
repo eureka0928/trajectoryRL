@@ -23,8 +23,8 @@ from trajectoryrl.utils.ncd import (
 
 
 def _pack(content: str) -> dict:
-    """Helper: build a minimal pack dict with given AGENTS.md content."""
-    return {"files": {"AGENTS.md": content}}
+    """Helper: build a minimal pack dict with given SKILL.md content."""
+    return {"files": {"SKILL.md": content}}
 
 
 DISTINCT_A = (
@@ -146,10 +146,10 @@ class TestDeduplicatePacks:
         # C should point to A (the true original)
         assert result["hk_c"] == "hk_a"
 
-    # -- Fix 2: empty AGENTS.md treated as identical --
+    # -- Fix 2: empty SKILL.md treated as identical --
 
-    def test_empty_agents_md_treated_as_identical(self):
-        """Two packs with empty AGENTS.md should be similarity=1.0,
+    def test_empty_skill_md_treated_as_identical(self):
+        """Two packs with empty SKILL.md should be similarity=1.0,
         later one excluded (not skipped)."""
         info = {
             "hk_a": (_pack(""), 100, "hash_a"),
@@ -158,7 +158,7 @@ class TestDeduplicatePacks:
         result = deduplicate_packs(info)
         assert result == {"hk_b": "hk_a"}
 
-    def test_whitespace_only_agents_md(self):
+    def test_whitespace_only_skill_md(self):
         """Whitespace-only normalizes to empty → same as empty case."""
         info = {
             "hk_a": (_pack("   \n\n  "), 100, "hash_a"),
@@ -169,8 +169,8 @@ class TestDeduplicatePacks:
 
     # -- Edge cases --
 
-    def test_missing_agents_md_skipped(self):
-        """Pack without AGENTS.md is skipped in Layer 2 (no crash)."""
+    def test_missing_skill_md_skipped(self):
+        """Pack without SKILL.md is skipped in Layer 2 (no crash)."""
         info = {
             "hk_a": ({"files": {}}, 100, "hash_a"),
             "hk_b": (_pack(DISTINCT_A), 200, "hash_b"),
@@ -223,8 +223,8 @@ class TestPRTestPlan:
         assert result["hk_b"] == "hk_a", "B excluded, attributed to A"
         assert result["hk_c"] == "hk_a", "C excluded, attributed to A (not B)"
 
-    def test_plan_2_empty_agents_md(self):
-        """PR test plan #2: two packs with empty AGENTS.md →
+    def test_plan_2_empty_skill_md(self):
+        """PR test plan #2: two packs with empty SKILL.md →
         later submitter excluded."""
         info = {
             "hk_a": (_pack(""), 100, "hash_a"),
