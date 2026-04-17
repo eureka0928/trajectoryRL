@@ -165,11 +165,9 @@ class TrajectoryValidator:
             cache_dir=config.pack_cache_dir,
         )
 
-        # Per-scenario raw costs from latest eval: {hotkey: {scenario: cost_usd}}
-        self.raw_costs: Dict[str, Dict[str, float]] = {}
-
-        # Per-scenario qualification (latest judge verdict): {hotkey: {scenario: bool}}
-        self.scenario_qualified: Dict[str, Dict[str, bool]] = {}
+        # Per-scenario continuous quality scores: {hotkey: {scenario: float in [0.0, 1.0]}}
+        # Source: judge_details[scenario].overall_score (S1 sandbox eval).
+        self.scenario_scores: Dict[str, Dict[str, float]] = {}
 
         # Latest token usage per hotkey/scenario: {hotkey: {scenario: {input_tokens, ...}}}
         self.latest_token_usage: Dict[str, Dict[str, Dict[str, int]]] = {}
@@ -381,8 +379,7 @@ class TrajectoryValidator:
                 )
                 return
 
-            self.raw_costs = data.get("raw_costs", data.get("ema_costs", {}))
-            self.scenario_qualified = data.get("scenario_qualified", {})
+            self.scenario_scores = data.get("scenario_scores", {})
             self._eval_pack_hash = data.get("eval_pack_hash", data.get("ema_pack_hash", {}))
             self.last_eval_block = {
                 k: int(v) for k, v in data.get("last_eval_block", {}).items()
@@ -396,7 +393,7 @@ class TrajectoryValidator:
                 self.integrity_judge.load_cache(integrity_cache)
 
             logger.debug(
-                f"Loaded eval state: {len(self.raw_costs)} hotkeys"
+                f"Loaded eval state: {len(self.scenario_scores)} hotkeys"
             )
         except Exception as e:
             logger.warning(f"Failed to load eval state: {e}, starting fresh")
@@ -406,8 +403,7 @@ class TrajectoryValidator:
         data = {
             "scoring_version": _scoring_version(),
             "scenario_config_hash": self._scenario_config_hash,
-            "raw_costs": self.raw_costs,
-            "scenario_qualified": self.scenario_qualified,
+            "scenario_scores": self.scenario_scores,
             "eval_pack_hash": self._eval_pack_hash,
             "last_eval_block": self.last_eval_block,
             "last_eval_window": self._last_eval_window,
@@ -430,10 +426,9 @@ class TrajectoryValidator:
         self,
         hotkey: str,
         pack_hash: str,
-        scenario_costs: Optional[Dict[str, float]] = None,
-        scenario_qualified: Optional[Dict[str, bool]] = None,
+        scenario_scores: Optional[Dict[str, float]] = None,
     ):
-        """Record raw per-scenario costs and qualification for a miner.
+        """Record per-scenario quality scores.
 
         Resets data when pack_hash changes (new pack = new observations).
         """
@@ -443,40 +438,15 @@ class TrajectoryValidator:
                 f"({self._eval_pack_hash.get(hotkey, 'none')[:8]} -> {pack_hash[:8]}), "
                 f"resetting eval data"
             )
-            self.raw_costs[hotkey] = {}
-            self.scenario_qualified[hotkey] = {}
+            self.scenario_scores[hotkey] = {}
             self.latest_token_usage.pop(hotkey, None)
             self.latest_model_usage.pop(hotkey, None)
             self._eval_pack_hash[hotkey] = pack_hash
 
-        if scenario_costs:
-            if hotkey not in self.raw_costs:
-                self.raw_costs[hotkey] = {}
-            for scenario, cost in scenario_costs.items():
-                if cost is not None:
-                    self.raw_costs[hotkey][scenario] = cost
-
-        if scenario_qualified:
-            if hotkey not in self.scenario_qualified:
-                self.scenario_qualified[hotkey] = {}
-            self.scenario_qualified[hotkey].update(scenario_qualified)
-
-    def compute_total_cost(self, hotkey: str) -> Optional[float]:
-        """Compute average cost across evaluated scenarios.
-
-        Returns None if no cost data available.
-        """
-        costs = self.raw_costs.get(hotkey, {})
-        if not costs:
-            return None
-        return sum(costs.values()) / len(costs)
-
-    def is_fully_qualified(self, hotkey: str) -> bool:
-        """Check if a miner passes the qualification gate on all evaluated scenarios."""
-        qualified = self.scenario_qualified.get(hotkey, {})
-        if not qualified:
-            return False
-        return all(qualified.values())
+        if scenario_scores:
+            if hotkey not in self.scenario_scores:
+                self.scenario_scores[hotkey] = {}
+            self.scenario_scores[hotkey].update(scenario_scores)
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -654,9 +624,11 @@ class TrajectoryValidator:
         scores_by_hotkey: Dict[str, float] = {}
         disqualified_by_hotkey: Dict[str, str] = {}
 
-        for hotkey, scenario_q in self.scenario_qualified.items():
-            if scenario_q:
-                score = sum(1.0 if q else 0.0 for q in scenario_q.values()) / len(scenario_q)
+        # Aggregate continuous quality scores from judge overall_score.
+        # Winner-take-all downstream, so the mean is just used to rank miners.
+        for hotkey, scenario_s in self.scenario_scores.items():
+            if scenario_s:
+                score = sum(scenario_s.values()) / len(scenario_s)
                 scores_by_hotkey[hotkey] = round(score, 4)
 
         for hotkey, reason in getattr(self, "_disqualified_miners", {}).items():
@@ -1504,8 +1476,7 @@ class TrajectoryValidator:
                         **self._harness_metadata(),
                     )
                 )
-                self.raw_costs.pop(hotkey, None)
-                self.scenario_qualified.pop(hotkey, None)
+                self.scenario_scores.pop(hotkey, None)
                 self._eval_pack_hash.pop(hotkey, None)
                 continue
 
@@ -1557,8 +1528,7 @@ class TrajectoryValidator:
                         )
                     )
                     self._disqualified_miners[hotkey] = f"pre_eval_rejected:{reason}"
-                    self.raw_costs.pop(hotkey, None)
-                    self.scenario_qualified.pop(hotkey, None)
+                    self.scenario_scores.pop(hotkey, None)
                     self._eval_pack_hash.pop(hotkey, None)
                     continue
 
@@ -1600,10 +1570,25 @@ class TrajectoryValidator:
                 self._eval_counts[hotkey] = self._eval_counts.get(hotkey, 0) + 1
                 eval_count = self._eval_counts[hotkey]
 
+                raw_q = eval_result.get("qualified") or {}
+                raw_jd = eval_result.get("judge_details") or {}
+                scenario_scores_map = {}
+                for sname, qv in raw_q.items():
+                    jd = raw_jd.get(sname) or {}
+                    overall = jd.get("overall_score")
+                    if overall is not None:
+                        scenario_scores_map[sname] = float(overall)
+                    else:
+                        logger.warning(
+                            "Miner %d scenario %s: missing overall_score "
+                            "in judge_details, defaulting to 0.0",
+                            uid, sname,
+                        )
+                        scenario_scores_map[sname] = 0.0
+
                 self._update_eval_results(
                     hotkey, commitment.pack_hash,
-                    scenario_costs=eval_result.get("costs"),
-                    scenario_qualified=eval_result.get("qualified"),
+                    scenario_scores=scenario_scores_map,
                 )
                 self.last_eval_block[hotkey] = current_block
                 evaluated_count += 1
@@ -1667,20 +1652,6 @@ class TrajectoryValidator:
             f"Eval cycle complete ({cycle_min:.1f}min): {total_eligible} eligible, "
             + ", ".join(parts)
         )
-
-        # Log cost summary to per-miner files
-        if evaluated_count > 0:
-            for uid, commitment in active_commitments.items():
-                hk = commitment.hotkey
-                total_cost = self.compute_total_cost(hk)
-                if total_cost is not None:
-                    per_scenario = self.raw_costs.get(hk, {})
-                    scenario_str = ", ".join(
-                        f"{s}=${c:.4f}" for s, c in sorted(per_scenario.items())
-                    )
-                    self._get_miner_logger(hk).info(
-                        f"Total cost: ${total_cost:.4f} ({scenario_str})"
-                    )
 
         # All attempted evaluations failed — likely a validator-side
         # issue.  Mark unhealthy so the next cycle ignores cached results.
@@ -1800,7 +1771,7 @@ class TrajectoryValidator:
         3. Return quality-based scores
 
         Returns:
-            Dict with keys "costs", "qualified" mapping
+            Dict with keys "qualified", "judge_details" mapping
             scenario_name to values, or None if pre-evaluation checks fail.
         """
         mlog = self._get_miner_logger(commitment.hotkey)
@@ -1844,7 +1815,7 @@ class TrajectoryValidator:
         not cost-based).
 
         Returns same shape as _evaluate_miner for pipeline compatibility:
-            {"costs": {...}, "qualified": {...}, ...}
+            {"qualified": {...}, "judge_details": {...}, ...}
         """
         mlog = self._get_miner_logger(commitment.hotkey)
 
@@ -1899,7 +1870,6 @@ class TrajectoryValidator:
         )
 
         scenario_qualified = {scenario_name: qualified}
-        scenario_costs = {}  # S1 is quality-based, not cost-based
         scenario_judge_details = {
             scenario_name: {
                 "overall_score": round(result.score, 4),
@@ -1915,7 +1885,6 @@ class TrajectoryValidator:
         }
 
         return {
-            "costs": scenario_costs,
             "qualified": scenario_qualified,
             "token_usage": {},
             "model_usage": {},
@@ -1965,31 +1934,34 @@ class TrajectoryValidator:
         hotkey = commitment.hotkey
 
         raw_qualified = eval_result.get("qualified") or {}
-        raw_costs = eval_result.get("costs") or {}
+        raw_judge_details = eval_result.get("judge_details") or {}
 
-        # Aggregate raw score (mean of binary qualification)
+        def _scenario_score(sname: str, qualified_val: bool) -> float:
+            jd = raw_judge_details.get(sname) or {}
+            overall = jd.get("overall_score")
+            if overall is not None:
+                return float(overall)
+            logger.warning(
+                "Scenario %s: missing overall_score in judge_details, "
+                "defaulting to 0.0", sname,
+            )
+            return 0.0
+
+        # Aggregate raw score (mean across scenarios)
         raw_score = (
-            sum(1.0 if q else 0.0 for q in raw_qualified.values()) / len(raw_qualified)
+            sum(_scenario_score(s, q) for s, q in raw_qualified.items())
+            / len(raw_qualified)
             if raw_qualified else 0.0
-        )
-
-        # Aggregate raw cost (mean across scenarios)
-        raw_cost = (
-            sum(raw_costs.values()) / len(raw_costs)
-            if raw_costs else 0.0
         )
 
         # Per-scenario results
         scenario_results: Dict[str, Any] = {}
         for sname, q in raw_qualified.items():
             entry: Dict[str, Any] = {
-                "score": 1.0 if q else 0.0,
+                "score": round(_scenario_score(sname, q), 4),
                 "weight": 1.0,
                 "qualified": q,
             }
-            if sname in raw_costs:
-                entry["cost"] = round(raw_costs[sname], 4)
-                entry["raw_cost"] = round(self.raw_costs.get(hotkey, {}).get(sname, 0.0), 4)
             tu = (eval_result.get("token_usage") or {}).get(sname)
             if tu:
                 entry["token_usage"] = tu
@@ -2003,15 +1975,11 @@ class TrajectoryValidator:
 
         # Log the full eval summary to the per-miner file for debugging.
         mlog = self._get_miner_logger(hotkey)
-        fully_qualified = self.is_fully_qualified(hotkey)
-        total_raw_cost = self.compute_total_cost(hotkey) or 0.0
         mlog.info(
             f"=== eval summary (uid={uid}, eval#{eval_count}) ==="
         )
         mlog.info(
-            f"  score={raw_score:.4f} cost=${raw_cost:.4f} "
-            f"total_cost=${total_raw_cost:.4f} qualified={fully_qualified} "
-            f"pack_changed={pack_changed}"
+            f"  score={raw_score:.4f} pack_changed={pack_changed}"
         )
         mlog.info(
             f"  pack_url={commitment.pack_url} "
@@ -2021,8 +1989,6 @@ class TrajectoryValidator:
             jd = sr.get("judge", {})
             mlog.info(
                 f"  {sname}: qualified={sr.get('qualified')} "
-                f"cost=${sr.get('cost', 0):.4f} "
-                f"raw_cost=${sr.get('raw_cost', 0):.4f} "
                 f"judge_score={jd.get('overall_score', '?')} "
                 f"verdict={jd.get('verdict', '?')} "
                 f"grounded={jd.get('grounded', '?')} "
@@ -2054,7 +2020,7 @@ class TrajectoryValidator:
             block_height=block_height,
             score=round(raw_score, 4),
             weight=0.0,
-            qualified=fully_qualified,
+            qualified=bool(raw_qualified and all(raw_qualified.values())),
             pack_url=commitment.pack_url,
             pack_hash=commitment.pack_hash,
             eval_count=eval_count,

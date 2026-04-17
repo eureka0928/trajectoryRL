@@ -1027,8 +1027,6 @@ class TestPerScenarioEvalState:
             validator.config = config
             validator.metagraph = mock_metagraph
             validator.subtensor = mock_subtensor
-            validator.raw_costs = {}
-            validator.scenario_qualified = {}
             validator._eval_pack_hash = {}
             validator.last_eval_block = {}
             validator._hotkey_uid_map = {}
@@ -1044,8 +1042,6 @@ class TestPerScenarioEvalState:
             validator._miner_loggers = {}
             validator._miner_log_dir = Path("/tmp/test_logs/miners")
             validator._miner_log_dir.mkdir(parents=True, exist_ok=True)
-            validator._consensus_costs = {}
-            validator._consensus_qualified = {}
             validator._consensus_window = -1
             validator.scenarios = {
                 "client_escalation": {"weight": 1.5},
@@ -1093,8 +1089,7 @@ class TestPerScenarioEvalState:
         """Eval state can be saved and loaded."""
         v = self._make_validator()
         v._scenario_config_hash = "test_hash"
-        v.raw_costs = {"hk_0": {"client_escalation": 0.042}}
-        v.scenario_qualified = {"hk_0": {"client_escalation": True}}
+        v.scenario_scores = {"hk_0": {"client_escalation": 0.85}}
         v._eval_pack_hash = {"hk_0": "hash_a"}
         v.last_eval_block = {"hk_0": 99000}
 
@@ -1109,87 +1104,41 @@ class TestPerScenarioEvalState:
             v2._scenario_config_hash = "test_hash"
             v2._load_eval_state()
 
-            assert v2.raw_costs == {"hk_0": {"client_escalation": 0.042}}
-            assert v2.scenario_qualified == {"hk_0": {"client_escalation": True}}
+            assert v2.scenario_scores == {"hk_0": {"client_escalation": 0.85}}
             assert v2._eval_pack_hash == {"hk_0": "hash_a"}
             assert v2.last_eval_block == {"hk_0": 99000}
         finally:
             v.config.eval_state_path.unlink(missing_ok=True)
 
-    def test_raw_cost_tracking(self):
-        """Raw costs are recorded per-scenario."""
+    def test_scenario_score_tracking(self):
+        """Scenario scores are recorded per-scenario."""
         v = self._make_validator()
         v._update_eval_results("hk_0", "hash_a",
-            scenario_costs={"client_escalation": 0.050},
-            scenario_qualified={"client_escalation": True},
+            scenario_scores={"client_escalation": 0.85},
         )
-        assert v.raw_costs["hk_0"]["client_escalation"] == 0.050
-        assert v.scenario_qualified["hk_0"]["client_escalation"] is True
+        assert v.scenario_scores["hk_0"]["client_escalation"] == 0.85
 
-    def test_raw_cost_overwrites_on_new_eval(self):
-        """New evaluation overwrites previous raw cost (no smoothing)."""
+    def test_scenario_score_overwrites_on_new_eval(self):
+        """New evaluation overwrites previous score."""
         v = self._make_validator()
         v._update_eval_results("hk_0", "hash_a",
-            scenario_costs={"client_escalation": 0.050},
+            scenario_scores={"client_escalation": 0.85},
         )
         v._update_eval_results("hk_0", "hash_a",
-            scenario_costs={"client_escalation": 0.030},
+            scenario_scores={"client_escalation": 0.72},
         )
-        assert v.raw_costs["hk_0"]["client_escalation"] == 0.030
+        assert v.scenario_scores["hk_0"]["client_escalation"] == 0.72
 
-    def test_raw_cost_resets_on_pack_change(self):
-        """Raw costs reset when pack changes."""
+    def test_scenario_score_resets_on_pack_change(self):
+        """Scenario scores reset when pack changes."""
         v = self._make_validator()
         v._update_eval_results("hk_0", "hash_a",
-            scenario_costs={"client_escalation": 0.050},
+            scenario_scores={"client_escalation": 0.85},
         )
         v._update_eval_results("hk_0", "hash_b",
-            scenario_costs={"client_escalation": 0.030},
+            scenario_scores={"client_escalation": 0.72},
         )
-        assert v.raw_costs["hk_0"]["client_escalation"] == 0.030
-
-    def test_compute_total_cost(self):
-        """Total cost is weighted average across scenarios."""
-        v = self._make_validator()
-        v.raw_costs["hk_0"] = {
-            "client_escalation": 0.050,  # weight 1.5
-            "morning_brief": 0.030,      # weight 1.0
-        }
-        # weighted_avg = (1.5*0.050 + 1.0*0.030) / 2.5 = (0.075 + 0.030) / 2.5 = 0.042
-        cost = v.compute_total_cost("hk_0")
-        assert abs(cost - 0.042) < 1e-6
-
-    def test_compute_total_cost_no_data(self):
-        """No cost data returns None."""
-        v = self._make_validator()
-        assert v.compute_total_cost("hk_unknown") is None
-
-    def test_is_fully_qualified(self):
-        """Fully qualified requires all scenarios to pass."""
-        v = self._make_validator()
-        v.scenario_qualified["hk_0"] = {
-            "client_escalation": True,
-            "morning_brief": True,
-        }
-        assert v.is_fully_qualified("hk_0") is True
-
-    def test_is_not_fully_qualified(self):
-        """One failing scenario = not qualified."""
-        v = self._make_validator()
-        v.scenario_qualified["hk_0"] = {
-            "client_escalation": True,
-            "morning_brief": False,
-        }
-        assert v.is_fully_qualified("hk_0") is False
-
-    def test_is_not_qualified_missing_scenario(self):
-        """Missing scenario data = not qualified."""
-        v = self._make_validator()
-        v.scenario_qualified["hk_0"] = {
-            "client_escalation": True,
-            # morning_brief missing
-        }
-        assert v.is_fully_qualified("hk_0") is False
+        assert v.scenario_scores["hk_0"]["client_escalation"] == 0.72
 
     def test_uid_change_tracking(self):
         """UID change detection works for re-registration."""
@@ -1204,7 +1153,7 @@ class TestPerScenarioEvalState:
         """Loading eval state with different scenario config invalidates all state."""
         v = self._make_validator()
         v._scenario_config_hash = "old_hash"
-        v.raw_costs = {"hk_0": {"client_escalation": 0.042}}
+        v.scenario_scores = {"hk_0": {"client_escalation": 0.85}}
         v._eval_pack_hash = {"hk_0": "hash_a"}
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -1218,7 +1167,7 @@ class TestPerScenarioEvalState:
             v2._scenario_config_hash = "new_hash"
             v2._load_eval_state()
 
-            assert v2.raw_costs == {}
+            assert v2.scenario_scores == {}
             assert v2._eval_pack_hash == {}
         finally:
             v.config.eval_state_path.unlink(missing_ok=True)
@@ -1278,8 +1227,6 @@ class TestInactivityBlocks:
             validator.config = config
             validator.metagraph = mock_metagraph
             validator.subtensor = mock_subtensor
-            validator.raw_costs = {}
-            validator.scenario_qualified = {}
             validator._eval_pack_hash = {}
             validator.last_eval_block = {}
             validator._hotkey_uid_map = {}

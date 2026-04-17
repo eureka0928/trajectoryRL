@@ -276,8 +276,7 @@ class TestPRTestPlan:
         v.metagraph = mock_metagraph
         v.subtensor = mock_subtensor
         v.eval_scores = {}
-        v.raw_costs = {}
-        v.scenario_qualified = {}
+        v.scenario_scores = {}
         v._eval_pack_hash = {}
         v.last_eval_block = {}
         v._hotkey_uid_map = {}
